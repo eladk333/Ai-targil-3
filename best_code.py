@@ -3,24 +3,19 @@ import collections
 import time
 import random
 
-# Student ID
 id = ["322587064"]
 
 class ModelLearner:
     def __init__(self, robots_config, plants_config, plant_max_rewards):        
-        # Initialize stats. defaulting to 1 success / 1 total (100%) to start optimistic, 
-        # or 0.5/1 if we want to be neutral. Optimistic helps exploration.
         self.robot_stats = {rid: {"success": 1, "total": 1} for rid in robots_config}
         self.plant_stats = {}
         for pos in plants_config:
-            # Initialize with the known max reward (optimistic)
             max_r = plant_max_rewards.get(pos, 0)
             self.plant_stats[pos] = {"sum": max_r, "count": 1}
 
     def get_robot_prob(self, rid):
         stats = self.robot_stats.get(rid, {"success": 1, "total": 1})
-        # Avoid division by zero and clamp slightly above 0
-        return max(0.01, stats["success"] / stats["total"])
+        return stats["success"] / stats["total"]
 
     def get_expected_reward(self, plant_pos):
         stats = self.plant_stats.get(plant_pos, {"sum": 0, "count": 0})
@@ -40,30 +35,22 @@ class ModelLearner:
         if rid not in prev_robots or rid not in curr_robots: return
         prev_pos, prev_load = prev_robots[rid]
         curr_pos, curr_load = curr_robots[rid]
-        
         success = False
         
-        # [cite_start]Determine success based on state transition [cite: 65-81]
         if act_type in ["UP", "DOWN", "LEFT", "RIGHT"]:
             dr, dc = {"UP":(-1,0), "DOWN":(1,0), "LEFT":(0,-1), "RIGHT":(0,1)}[act_type]
             expected_pos = (prev_pos[0]+dr, prev_pos[1]+dc)
-            # If we arrived at the expected position, it was a success.
-            # (Technically a failure could randomly land here, but probability is negligible)
             if curr_pos == expected_pos: success = True
-            
         elif act_type == "LOAD":
             if curr_load > prev_load: success = True
-            
         elif act_type == "POUR":
             prev_plants = {p[0]: p[1] for p in prev_state[1]}
             curr_plants = {p[0]: p[1] for p in curr_state[1]}
             if prev_pos in prev_plants:
                 prev_need = prev_plants[prev_pos]
                 curr_need = curr_plants.get(prev_pos, 0)
-                # Success if need decreased
                 if curr_need < prev_need:
                     success = True
-                    # Update Plant Rewards
                     if reward_gained > 0:
                         if prev_pos not in self.plant_stats:
                              self.plant_stats[prev_pos] = {"sum": 0, "count": 0}
@@ -93,12 +80,10 @@ class Controller:
         self.last_state = self.game_ref.get_current_state()
         self.last_action = None
 
-        # Cache distances
         self.targets = set(self.problem_config.get("Plants", {}).keys()) | \
                        set(self.problem_config.get("Taps", {}).keys())
         self.initial_state = self._parse_initial_state()
         
-        # Add robot start positions to targets for flood fill map
         for r_info in self.initial_state[0]: self.targets.add(r_info[1])
         
         self.dist_cache = {}
@@ -106,7 +91,6 @@ class Controller:
         self.memo_table = {}
 
     def choose_next_action(self, state):
-        # Update Learner
         if self.last_action is not None:
             reward = self.game_ref.get_last_gained_reward()
             self.learner.update(self.last_state, self.last_action, state, reward)
@@ -124,28 +108,23 @@ class Controller:
         valid_moves = self._get_valid_moves(state)
         if not valid_moves: return "RESET"
         
-        # Pruning to reduce search space
         candidates = self._prune_moves(state, valid_moves, time_left)
         if not candidates: candidates = valid_moves
 
-        # Sort candidates by a quick heuristic to maximize alpha-beta/pruning potential
         def quick_score(action):
             rid = int(action.split()[1].strip("()"))
             atype = action.split()[0]
-            # Assume success for sorting
             next_s, _ = self._apply_state_change(state, rid, atype, True)
             return self._evaluate_state_utility(next_s, time_left - 1)
         
         candidates.sort(key=quick_score, reverse=True)
 
         t_start = time.time()
-        # Allocate time per step dynamically
         t_limit = 0.4 + (20.0 / self.time_limit)
         
         best_acts = [candidates[0]]
         
         try:
-            # Iterative Deepening Expectimax
             for depth in range(1, 4):
                 if (time.time() - t_start) > t_limit: break
                 
@@ -169,7 +148,6 @@ class Controller:
             
         if not best_acts: return random.choice(candidates)
         
-        # Prefer doing something useful (LOAD/POUR) if scores are tied
         preferred = [a for a in best_acts if "POUR" in a or "LOAD" in a]
         return random.choice(preferred) if preferred else random.choice(best_acts)
 
@@ -177,7 +155,6 @@ class Controller:
         outcomes = self._simulate_transition(state, action)
         avg_score = 0
         for next_s, prob, reward in outcomes:
-            # Weight immediate reward + discounted future utility
             future_val = self._recursive_expectimax(next_s, depth - 1, time_left - 1)
             avg_score += prob * (reward + (0.95 * future_val))
         return avg_score
@@ -191,29 +168,17 @@ class Controller:
         key = (state, depth, time_left)
         if key in self.memo_table: return self.memo_table[key]
         
-        # At leaf nodes of recursion, we evaluate utility
-        val = self._evaluate_state_utility(state, time_left)
-        self.memo_table[key] = val
-        return val
+        return self._evaluate_state_utility(state, time_left)
 
     def _evaluate_state_utility(self, state, time_left):
-        """
-        Heuristic function. 
-        CRITICAL FIX for Problem 3: Uses 'Expected Steps' (Distance / Probability) 
-        to coordinate robots with different success rates.
-        """
         robots, plants, taps, total_need = state
-        
-        # Base penalty for remaining work
         score = -(total_need * 500.0)
         
         active_taps = [pos for pos, amt in taps if amt > 0]
         plant_target_counts = collections.defaultdict(int)
 
         for rid, r_pos, load in robots:
-            # Get probability, clamped to avoid div/0
             prob = self.learner.get_robot_prob(rid)
-            prob = max(0.1, prob) 
             
             # --- CASE 1: Empty Robot (Needs Water) ---
             if load == 0:
@@ -221,7 +186,6 @@ class Controller:
                     score -= 1000 
                     continue
                 
-                # Find nearest tap
                 min_dist = 999
                 best_tap = None
                 for t_pos in active_taps:
@@ -230,52 +194,44 @@ class Controller:
                         min_dist = d
                         best_tap = t_pos
 
-                # Calculate Expected Steps to tap (Cost)
-                my_expected_steps_to_tap = min_dist / prob
-
                 # --- REDUNDANCY CHECK ---
-                # Should I go to the tap? Only if I am the "fastest" valid option for some plant.
+                # Before we encourage going to the tap, check if I am actually needed.
+                # If another robot is strictly closer to satisfying the plants, I should yield.
                 is_needed = False
                 if best_tap:
                     for p_pos, p_need in plants:
-                        # Estimate full trip: Me -> Tap -> Plant
-                        dist_tap_to_plant = self._get_dist(best_tap, p_pos)
-                        my_total_steps = my_expected_steps_to_tap + (dist_tap_to_plant / prob)
+                        my_total_dist = min_dist + self._get_dist(best_tap, p_pos)
                         
-                        i_am_fastest = True
+                        i_am_closest = True
                         for oid, opos, oload in robots:
                             if oid == rid: continue
                             
-                            # Other robot stats
-                            o_prob = max(0.1, self.learner.get_robot_prob(oid))
-
+                            # Estimate other robot's distance to this plant
                             if oload > 0:
-                                # They just need to go to plant
                                 o_dist = self._get_dist(opos, p_pos)
-                                o_steps = o_dist / o_prob
                             else:
-                                # They need to go to tap first
+                                # They also need to go to tap
                                 od_tap = 999
                                 for ot in active_taps:
                                     dx = self._get_dist(opos, ot)
                                     if dx < od_tap: od_tap = dx
-                                o_steps = (od_tap / o_prob) + (dist_tap_to_plant / o_prob)
+                                o_dist = od_tap + self._get_dist(best_tap, p_pos) # approx
 
-                            # Compare EXPECTED STEPS. 
-                            # If they are faster (lower steps), I am redundant for this plant.
-                            if o_steps < my_total_steps:
-                                i_am_fastest = False
+                            # If they are strictly faster, I am redundant for this plant
+                            if o_dist < my_total_dist:
+                                i_am_closest = False
                                 break
                         
-                        if i_am_fastest:
+                        if i_am_closest:
                             is_needed = True
                             break
                 
+                # If I'm redundant for ALL plants, don't reward movement
                 if not is_needed:
                     continue 
 
-                # If needed, penalize distance (encourage moving closer)
-                score -= (my_expected_steps_to_tap * 8.0) 
+                # If needed, encourage getting water
+                score -= (min_dist * 8.0) 
             
             # --- CASE 2: Loaded Robot (Needs Plant) ---
             else:
@@ -284,34 +240,23 @@ class Controller:
                 
                 for p_pos, need in plants:
                     if need <= 0: continue
-                    
                     dist = self._get_dist(r_pos, p_pos)
-                    expected_steps = dist / prob
-
                     reward_est = self.learner.get_expected_reward(p_pos)
-                    # Fallback if unknown
                     if reward_est == 0: reward_est = self.plant_max_rewards.get(p_pos, 5)
                     
-                    # Heuristic: Expected Reward - Cost of Time
-                    val = (reward_est * 10.0 * prob) - (expected_steps * 8.0)
+                    val = (reward_est * 10.0) - (dist * 8.0)
 
                     # --- TERRITORY CLAIMING ---
-                    # Check if another robot is FASTER (lower expected steps)
-                    am_i_fastest = True
+                    # Check if another robot is STRICTLY closer to this plant
+                    am_i_closest = True
                     for other_rid, other_pos, _ in robots:
                         if other_rid == rid: continue
-                        
-                        o_prob = max(0.1, self.learner.get_robot_prob(other_rid))
                         d_other = self._get_dist(other_pos, p_pos)
-                        o_steps = d_other / o_prob
-                        
-                        if o_steps < expected_steps:
-                            am_i_fastest = False
+                        if d_other < dist:
+                            am_i_closest = False
                             break
                     
-                    # If I'm not the fastest, heavily penalize targeting this plant
-                    # to prevent collisions and inefficiency
-                    if not am_i_fastest:
+                    if not am_i_closest:
                         val -= 100.0
 
                     if val > best_plant_val:
@@ -319,11 +264,10 @@ class Controller:
                         target_plant = p_pos
 
                 if target_plant:
-                    score += best_plant_val
+                    score += (best_plant_val * prob)
                     plant_target_counts[target_plant] += 1
                 score += 20.0
 
-        # Penalty if multiple robots target the same plant (redundancy)
         for p_pos, count in plant_target_counts.items():
             if count > 1:
                 score -= 15.0
@@ -331,9 +275,6 @@ class Controller:
         return score
 
     def _prune_moves(self, state, actions, time_left):
-        """
-        Heuristically remove moves that are obviously bad to speed up Expectimax.
-        """
         robots, plants, taps, total_need = state
         rmap = {r[0]: (r[1], r[2]) for r in robots}
         active_p = [p for p, n in plants]
@@ -349,12 +290,10 @@ class Controller:
             if rid not in rmap: continue
             pos, load = rmap[rid]
             
-            # Smart Loading logic
             if atype == "LOAD":
                 if load >= self.max_caps[rid]: continue
                 if load >= total_need: continue
                 
-                # Only load if I am the closest one to satisfy a need
                 my_valid_needs = []
                 for p_pos, p_need in plants:
                     d_me = self._get_dist(pos, p_pos)
@@ -368,18 +307,17 @@ class Controller:
                     if is_closest:
                         my_valid_needs.append(p_need)
                 
-                # Don't overfill
                 if my_valid_needs:
                     max_req = max(my_valid_needs)
                     if load >= max_req: continue
                 elif load > 0:
                     continue
 
-                grouped[rid].append((a, -999)) # Priority
+                grouped[rid].append((a, -999)) 
                 continue
             
             if atype == "POUR":
-                grouped[rid].append((a, -999)) # Priority
+                grouped[rid].append((a, -999))
                 continue
             
             targets = active_t if load == 0 else active_p
@@ -390,7 +328,6 @@ class Controller:
             dr, dc = {"UP":(-1,0), "DOWN":(1,0), "LEFT":(0,-1), "RIGHT":(0,1)}[atype]
             npos = (pos[0]+dr, pos[1]+dc)
             
-            # Rank moves by distance to nearest target
             min_dist = 999
             for t in targets:
                 d = self._get_dist(npos, t)
@@ -402,7 +339,6 @@ class Controller:
             if not moves: continue
             moves.sort(key=lambda x: x[1])
             best_dist = moves[0][1]
-            # Keep only the moves that are optimal (or tied for optimal) in direction
             for act, d in moves:
                 if d <= best_dist: 
                     final.append(act)
@@ -417,12 +353,10 @@ class Controller:
         tlocs = {pos for pos, _ in taps}
         
         for rid, (r, c), load in robots:
-            # Movement
             for act, (dr, dc) in { "UP":(-1,0), "DOWN":(1,0), "LEFT":(0,-1), "RIGHT":(0,1) }.items():
                 nr, nc = r+dr, c+dc
                 if 0 <= nr < self.grid_h and 0 <= nc < self.grid_w and (nr, nc) not in self.walls:
                     if (nr, nc) not in occ: legal.append(f"{act} ({rid})")
-            # Interact
             if (r, c) in tlocs and load < self.max_caps[rid]: legal.append(f"LOAD ({rid})")
             if (r, c) in plocs and load > 0: legal.append(f"POUR ({rid})")
         legal.append("RESET")
@@ -436,15 +370,12 @@ class Controller:
         prob = self.learner.get_robot_prob(rid)
         
         outcomes = []
-        # Case 1: Success
         s_succ, r_succ = self._apply_state_change(state, rid, atype, True)
         outcomes.append((s_succ, prob, r_succ))
         
-        # Case 2: Failure
         p_fail = 1.0 - prob
         if p_fail > 0:
             if atype in ["UP", "DOWN", "LEFT", "RIGHT"]:
-                # On move fail: randomly choose other direction or stay
                 valid = self._get_robot_moves_only(state, rid)
                 others = [m for m in valid if m != atype] + ["STAY"]
                 sub_p = p_fail / len(others)
@@ -454,11 +385,9 @@ class Controller:
                         sf, _ = self._apply_state_change(state, rid, fa, True)
                         outcomes.append((sf, sub_p, 0))
             elif atype == "POUR":
-                # On pour fail: lose water, no plant update
                 sf, _ = self._apply_state_change(state, rid, atype, False)
                 outcomes.append((sf, p_fail, 0))
             elif atype == "LOAD":
-                # On load fail: nothing happens
                 outcomes.append((state, p_fail, 0))
         return outcomes
 
@@ -500,7 +429,6 @@ class Controller:
                     rl[idx] = (rid, (r,c), load - 1)
                 else: rl[idx] = (rid, (r,c), load - 1)
             else:
-                # Failure spills water
                 rl[idx] = (rid, (r,c), load - 1)
 
         rl.sort(key=lambda x: x[0])
