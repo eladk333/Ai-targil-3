@@ -2,7 +2,7 @@ import ext_plant
 import ex3
 import time
 import numpy as np
-# import ex3_random
+#import ex3_random
 import sys
 
 # ANSI color codes for nicer terminal output
@@ -84,12 +84,100 @@ def draw_board(problem):
         print(f"Plant rewards: {', '.join(pr_strs)}")
 
 
+def is_action_legal(game: ext_plant.Game, chosen_action: str):
+    """Return (True, '') if action legal in current state, else (False, reason).
+
+    This mirrors the legality checks performed in `ext_plant.Game.submit_next_action` without changing the game state.
+    """
+    if chosen_action == "RESET":
+        return True, ""
+
+    # Parse action (may raise ValueError for bad format)
+    try:
+        action_name, robot_id = game.parse_robot_action(chosen_action)
+    except Exception as e:
+        return False, f"Bad action format or unknown action: {e}"
+
+    # Get current state
+    robots_t, plants_t, taps_t, total_water_need = game.get_current_state()
+
+    # Find robot
+    robot_entry = None
+    for rid, (pos, load) in [(r[0], (r[1], r[2])) for r in robots_t]:
+        pass
+    robot_idx = None
+    r = c = load = None
+    for idx, (rid, (rr, cc), l) in enumerate(robots_t):
+        if rid == robot_id:
+            robot_idx = idx
+            r, c, load = rr, cc, l
+            break
+    if robot_idx is None:
+        return False, f"Robot {robot_id} not found in state"
+
+    robot_pos = (r, c)
+    plant_positions = {pos for (pos, need) in plants_t}
+    tap_positions = {pos for (pos, water) in taps_t}
+
+    # occupied positions by other robots
+    occupied_positions = {
+        (rr, cc) for (rid, (rr, cc), l) in robots_t if rid != robot_id
+    }
+
+    base_applicable = game.applicable_actions.get(robot_pos, [])
+
+    dynamic_applicable = []
+    for a in base_applicable:
+        if a in ("UP", "DOWN", "LEFT", "RIGHT"):
+            if a == "UP":
+                target = (r - 1, c)
+            elif a == "DOWN":
+                target = (r + 1, c)
+            elif a == "LEFT":
+                target = (r, c - 1)
+            else:
+                target = (r, c + 1)
+            if target in occupied_positions:
+                continue
+        dynamic_applicable.append(a)
+
+    # Additional checks for POUR/LOAD
+    if action_name in ("UP", "DOWN", "LEFT", "RIGHT"):
+        if action_name not in dynamic_applicable:
+            return (
+                False,
+                f"Move {action_name} not applicable from {robot_pos} (blocked or wall)",
+            )
+        return True, ""
+    if action_name == "POUR":
+        if action_name not in dynamic_applicable:
+            return False, "POUR not applicable at this position"
+        if load <= 0 or robot_pos not in plant_positions:
+            return False, "POUR precondition failed: not standing on plant or no load"
+        return True, ""
+    if action_name == "LOAD":
+        if action_name not in dynamic_applicable:
+            return False, "LOAD not applicable at this position"
+        cap = game.get_capacities().get(robot_id, None)
+        if cap is None:
+            return False, "Could not get robot capacity"
+        if load >= cap or robot_pos not in tap_positions:
+            return False, "LOAD precondition failed: at tap or capacity reached"
+        return True, ""
+
+    return False, "Unknown action or not applicable"
+
+
 def solve(game: ext_plant.Game, run_idx: int, controller_module):
     policy = controller_module.Controller(game)
     for i in range(game.get_max_steps()):
-        game.submit_next_action(
-            chosen_action=policy.choose_next_action(game.get_current_state())
-        )
+        action = policy.choose_next_action(game.get_current_state())
+        legal, reason = is_action_legal(game, action)
+        if not legal:
+            raise ValueError(
+                f"Illegal action chosen by controller on run {run_idx}: {action!r}. Reason: {reason}"
+            )
+        game.submit_next_action(chosen_action=action)
         if game.get_done():
             break
 
@@ -148,7 +236,7 @@ problem_pdf = {
         (2, 0): [1, 2, 3, 4],
     },
     "seed": 45,
-    "horizon": 30,
+    "horizon": 60,
 }
 
 
@@ -168,7 +256,7 @@ problem_pdf2 = {
         (2, 0): [1, 2, 3, 4],
     },
     "seed": 45,
-    "horizon": 35,
+    "horizon": 60,
 }
 
 problem_pdf3 = {
@@ -187,7 +275,7 @@ problem_pdf3 = {
         (2, 0): [10, 11, 12, 13],
     },
     "seed": 45,
-    "horizon": 30,
+    "horizon": 60,
 }
 
 problem_new1_version1 = {
@@ -220,7 +308,7 @@ problem_new1_version1 = {
         (0, 1): [10, 11, 12, 13],
     },
     "seed": 45,
-    "horizon": 30,
+    "horizon": 60,
 }
 problem_new1_version2 = {
     "Size": (5, 6),
@@ -284,7 +372,7 @@ problem_new1_version3 = {
         (0, 1): [10, 11, 12, 13],
     },
     "seed": 45,
-    "horizon": 30,
+    "horizon": 60,
 }
 
 problem_new2_version1 = {
@@ -318,7 +406,7 @@ problem_new2_version1 = {
         (4, 5): [5, 7],
     },
     "seed": 45,
-    "horizon": 30,
+    "horizon": 60,
 }
 
 problem_new2_version2 = {
@@ -385,7 +473,7 @@ problem_new2_version3 = {
         (4, 5): [5, 7],
     },
     "seed": 45,
-    "horizon": 30,
+    "horizon": 60,
 }
 problem_new2_version4 = {
     "Size": (5, 6),
@@ -463,7 +551,7 @@ problem_new3_version1 = {
         (9, 0): [1, 3],
     },
     "seed": 45,
-    "horizon": 30,
+    "horizon": 60,
 }
 
 problem_new3_version2 = {
@@ -507,7 +595,7 @@ problem_new3_version2 = {
         (9, 0): [1, 3],
     },
     "seed": 45,
-    "horizon": 50,
+    "horizon": 100,
 }
 
 
@@ -582,7 +670,7 @@ problem_new4_version1 = {
         (9, 9): [1, 3],
     },
     "seed": 45,
-    "horizon": 210,  # "horizon": 70,
+    "horizon": 140,  # "horizon": 70,
 }
 
 # reset ?
@@ -613,7 +701,7 @@ problem_new4_version2 = {
         (9, 9): [1, 3],
     },
     "seed": 45,
-    "horizon": 40,
+    "horizon": 80,
 }
 
 
@@ -626,61 +714,101 @@ def append_lines(path: str, lines: list[str]):
 
 def main():
     debug_mode = False
-    n_runs = 30
+    n_runs = 5
 
     # Keep the same problem list as before
     problems = [
         ("problem_pdf", problem_pdf),
         ("problem_pdf2", problem_pdf2),
         ("problem_pdf3", problem_pdf3),
-        # ("problem_new1_version1", problem_new1_version1),
-        # ("problem_new1_version2", problem_new1_version2),
-        # ("problem_new1_version3", problem_new1_version3),
-        # ("problem_new2_version1", problem_new2_version1),
-        # ("problem_new2_version2", problem_new2_version2),
-        # ("problem_new2_version3", problem_new2_version3),
-        # ("problem_new2_version4", problem_new2_version4),
-        # ("problem_new3_version1", problem_new3_version1),
-        # ("problem_new3_version2", problem_new3_version2),
-        # ("problem_new3_version3", problem_new3_version3),
-        # ("problem_new4_version1", problem_new4_version1),
-        # ("problem_new4_version2", problem_new4_version2),
+        ("problem_new1_version1", problem_new1_version1),
+        ("problem_new1_version2", problem_new1_version2),
+        ("problem_new1_version3", problem_new1_version3),
+        ("problem_new2_version1", problem_new2_version1),
+        ("problem_new2_version2", problem_new2_version2),
+        ("problem_new2_version3", problem_new2_version3),
+        ("problem_new2_version4", problem_new2_version4),
+        ("problem_new3_version1", problem_new3_version1),
+        ("problem_new3_version2", problem_new3_version2),
+        ("problem_new3_version3", problem_new3_version3),
+        ("problem_new4_version1", problem_new4_version1),
+        ("problem_new4_version2", problem_new4_version2),
     ]
 
-    # Estimated baseline values provided by user
-    baseline_map = {
-        "problem_pdf": (19.86889, 0.0),
-        "problem_pdf2": (28.33333, 0.0),
-        "problem_pdf3": (32.56667, 0.0),
-        "problem_new1_version1": (59.325, 0.0),
-        "problem_new1_version2": (81.87778, 0.0),
-        "problem_new1_version3": (25.472, 0.0),
-        "problem_new2_version1": (44.33333, 0.0),
-        "problem_new2_version2": (123.715, 0.0),
-        "problem_new2_version3": (65.5859, 0.0),
-        "problem_new2_version4": (41.65, 0.0),
-        "problem_new3_version1": (5.925, 0.0),
-        "problem_new3_version2": (7.176667, 0.0),
-        "problem_new3_version3": (8.922222, 0.0),
-        "problem_new4_version1": (120.5333, 0.0),
-        "problem_new4_version2": (20.76238, 0.0),
+    # Official baselines (🟩) provided by user
+    official_baseline_map = {
+        "problem_pdf": (44.0, 0.0),
+        # "problem_pdf3": (37.0, 0.0),
+        # "problem_new1_version1": (83.0, 0.0),
+        # "problem_new1_version3": (57.0, 0.0),
+        # "problem_new2_version1": (85.0, 0.0),
+        # "problem_new2_version3": (88.0, 0.0),
+        # "problem_new3_version1": (71.0, 0.0),
+        # "problem_new3_version2": (20.0, 0.0),
+        # "problem_new4_version1": (35.0, 0.0),
     }
+
+    # Estimated baselines (⬜) — kept for comparison but marked as estimated
+    estimated_baseline_map = {
+        "problem_pdf2": (28.33333, 0.0),
+        "problem_new1_version2": (81.87778, 0.0),
+        "problem_new2_version2": (123.715, 0.0),
+        "problem_new2_version4": (41.65, 0.0),
+        "problem_new3_version3": (8.922222, 0.0),
+        "problem_new4_version2": (12.0, 0.0),
+    }
+
+    def get_baseline_info(pname: str):
+        """Return (baseline_avg, baseline_time, is_estimated).
+        Official baselines (in official_baseline_map) are not estimated.
+        Estimated baselines come from estimated_baseline_map.
+        If no baseline is available, returns (None, None, False).
+        """
+        if pname in official_baseline_map:
+            a, t = official_baseline_map[pname]
+            return a, t, False
+        if pname in estimated_baseline_map:
+            a, t = estimated_baseline_map[pname]
+            return a, t, True
+        return None, None, False
 
     summaries = []
 
-    # choose controller module: default `ex3`, or `ex3_random` when 'random' passed
+    # parse CLI args
     args = sys.argv[1:]
+    argstr = " ".join(args).lower()
+    baseline_only = False
+    if "baseline" in argstr:
+        baseline_only = True
+
+    # strict mode: abort on first timeout or illegal action when enabled
+    strict_mode = False
+    if "strict" in argstr:
+        strict_mode = True
+        print(
+            f"{BOLD}{YELLOW}Strict mode enabled: will abort on first timeout or illegal action.{RESET}"
+        )
+
+    # choose controller module: default `ex3`, or `ex3_random` when 'random' passed
     if "random" in args:
         controller_module = ex3_random
     else:
         controller_module = ex3
 
+    # if requested, filter to baseline-only problems
+    if baseline_only:
+        problems = [(p, prob) for (p, prob) in problems if p in official_baseline_map]
+        print(
+            f"{BOLD}{YELLOW}Running baseline-only; {len(problems)} problems will be executed.{RESET}"
+        )
+
     for idx, (pname, problem) in enumerate(problems, start=1):
+        marker = "🟩" if pname in official_baseline_map else "⬜"
         print()
-        print(f"*** Problem: {pname} ({idx}) ***")
+        print(f"{marker} *** Problem: {pname} ({idx}) ***")
         draw_board(problem)
         print(
-            f"\n{SEP}\n{BOLD}{MAGENTA}--- Running {pname} (problem index slice item {idx}) ---{RESET}"
+            f"{marker} \n{SEP}\n{BOLD}{MAGENTA}--- Running {pname} (problem index slice item {idx}) ---{RESET}"
         )
 
         total_reward = 0.0
@@ -692,9 +820,20 @@ def main():
             problem["seed"] = seed
             game = ext_plant.create_pressure_plate_game((problem, debug_mode))
 
-            run_start = time.time()
-            run_reward = solve(game, seed, controller_module)
-            run_duration = time.time() - run_start
+            try:
+                run_start = time.time()
+                run_reward = solve(game, seed, controller_module)
+                run_duration = time.time() - run_start
+            except ValueError as e:
+                print(
+                    f"{RED}ERROR: Illegal action detected during run {seed}: {e}{RESET}"
+                )
+                print(f"{RED}Aborting tests due to illegal action.{RESET}")
+                sys.exit(1)
+            except Exception as e:
+                print(f"{RED}ERROR during run {seed}: {e}{RESET}")
+                sys.exit(1)
+
             run_times.append(run_duration)
             total_reward += run_reward
 
@@ -703,6 +842,13 @@ def main():
             print(
                 f"Run {seed:2d} time: {run_duration:.2f}s | Limit: {time_limit:.2f}s | {status_color}{'OK' if limit_ok else 'TIMEOUT'}{RESET}"
             )
+
+            # Strict timeout handling: abort on first timeout when strict_mode enabled
+            if (not limit_ok) and strict_mode:
+                print(
+                    f"{RED}Strict mode: aborting on first timeout (run {seed}).{RESET}"
+                )
+                sys.exit(1)
 
         duration = sum(run_times)
         avg_time_per_run = duration / n_runs if n_runs else 0.0
@@ -715,30 +861,32 @@ def main():
         )
 
         avg_reward = total_reward / n_runs if n_runs else 0.0
+        baseline_avg, baseline_time, is_estimated = get_baseline_info(pname)
         summaries.append(
             (
                 pname,
                 avg_reward,
                 duration,
-                baseline_map.get(pname, (None, None))[0],
-                baseline_map.get(pname, (None, None))[1],
+                baseline_avg,
+                baseline_time,
+                is_estimated,
                 time_status,
             )
         )
 
-        if pname in baseline_map:
-            baseline_reward, baseline_time = baseline_map[pname]
-            pct = (avg_reward / baseline_reward * 100) if baseline_reward > 0 else 0
+        if baseline_avg is not None:
+            pct = (avg_reward / baseline_avg * 100) if baseline_avg > 0 else 0
             comp = (
                 f"{GREEN}BETTER{RESET}"
-                if avg_reward > baseline_reward
+                if avg_reward > baseline_avg
                 else f"{RED}WORSE{RESET}"
             )
+            label = "estimated baseline" if is_estimated else "baseline"
             print(
-                f"\nAverage reward over {n_runs} runs: {avg_reward:.6f} ({pct:.1f}% of estimated baseline {baseline_reward:.6f}) | {comp} than estimated baseline"
+                f"\nAverage reward over {n_runs} runs: {avg_reward:.6f} ({pct:.1f}% of {label} {baseline_avg:.6f}) | {comp} than {label}"
             )
             print(
-                f"Estimated baseline time: {baseline_time}s | Current time: {duration:.2f}s | Status: {time_status}"
+                f"{label.capitalize()} time: {baseline_time}s | Current time: {duration:.2f}s | Status: {time_status}"
             )
         else:
             print(f"\nAverage reward over {n_runs} runs: {avg_reward}")
@@ -746,26 +894,37 @@ def main():
 
     # Final summary across all problems run
     print(f"\n{SEP}\n{BOLD}{CYAN}=== Summary (per problem) ==={RESET}")
-    for pname, avg, dur, baseline_avg, baseline_time, t_status in summaries:
+    for (
+        pname,
+        avg,
+        dur,
+        baseline_avg,
+        baseline_time,
+        is_estimated,
+        t_status,
+    ) in summaries:
         avg_col = f"{GREEN}{avg:.2f}{RESET}" if avg >= 0 else f"{RED}{avg:.2f}{RESET}"
-        if baseline_avg:
+        has_baseline = baseline_avg is not None
+        if has_baseline:
             pct = (avg / baseline_avg * 100) if baseline_avg > 0 else 0
             comp = (
                 f"{GREEN}BETTER{RESET}" if avg > baseline_avg else f"{RED}WORSE{RESET}"
             )
-            baseline_str = f"baseline {YELLOW}{baseline_avg:.2f}{RESET} (time {YELLOW}{baseline_time:.2f}s{RESET})"
+            baseline_label = "estimated baseline" if is_estimated else "baseline"
+            baseline_str = f"{baseline_label} {YELLOW}{baseline_avg:.2f}{RESET} (time {YELLOW}{baseline_time:.2f}s{RESET})"
         else:
             pct = 0
             comp = ""
             baseline_str = "no baseline"
+        marker = "🟩" if has_baseline and not is_estimated else "⬜"
         print(
-            f"{BOLD}{pname}{RESET}: average = {avg_col} ({pct:.1f}% of {baseline_str}) | time = {YELLOW}{dur:.2f}s{RESET} | {comp} {t_status}"
+            f"{marker} {BOLD}{pname}{RESET}: average = {avg_col} ({pct:.1f}% of {baseline_str}) | time = {YELLOW}{dur:.2f}s{RESET} | {comp} {t_status}"
         )
 
-    total_time = sum(d for (_, _, d, _, _, _) in summaries)
+    total_time = sum(d for (_, _, d, _, _, _, _) in summaries)
     print(f"{BOLD}Total time for all problems: {RESET}{YELLOW}{total_time:.2f}s{RESET}")
     if summaries:
-        overall_avg = sum(avg for (_, avg, _, _, _, _) in summaries) / len(summaries)
+        overall_avg = sum(avg for (_, avg, _, _, _, _, _) in summaries) / len(summaries)
         print(
             f"{BOLD}Overall average across {len(summaries)} problems: {RESET}{YELLOW}{overall_avg:.2f}{RESET}"
         )

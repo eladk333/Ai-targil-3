@@ -7,7 +7,7 @@ import copy
 
 # --- Problem Definitions (Exact match to ex3_check.py) ---
 PROBLEM_LIST = [
-    ("Problem 1 (Default)", {
+    ("Problem 1", {
         "Size":   (3, 3),
         "Walls":  {(0, 1), (2, 1)},
         "Taps":   {(1, 1): 6},
@@ -17,7 +17,7 @@ PROBLEM_LIST = [
         "goal_reward": 10,
         "plants_reward": {(0, 2): [1, 2, 3, 4], (2, 0): [1, 2, 3, 4]},
         "seed": 45,
-        "horizon": 30,
+        "horizon": 60,
     }),
     ("Problem 2 (Higher Reward/Horizon)", {
         "Size":   (3, 3),
@@ -41,7 +41,7 @@ PROBLEM_LIST = [
         "goal_reward": 30, # High goal reward
         "plants_reward": {(0, 2): [1, 2, 3, 4], (2, 0): [10, 11, 12, 13]},
         "seed": 45,
-        "horizon": 30,
+        "horizon": 60,
     })
 ]
 

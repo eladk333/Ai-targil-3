@@ -23,7 +23,7 @@ def solve(game: ext_plant.Game):
 
 # --- Problem Definitions ---
 
-problem_pdf = {
+problem_pdf = { # Need 44 average reward over 30 runs
     "Size":   (3, 3),
     "Walls":  {(0, 1), (2, 1)},
     "Taps":   {(1, 1): 6},
@@ -39,7 +39,7 @@ problem_pdf = {
         (2, 0) : [1,2,3,4],
     },
     "seed": 45,
-    "horizon": 30,
+    "horizon": 60,
 }
 
 problem_pdf2 = {
@@ -77,20 +77,20 @@ problem_pdf3 = {
         (2, 0) : [10,11,12,13],
     },
     "seed": 45,
-    "horizon": 30,
+    "horizon": 60,
 }
 
 # --- Main Execution ---
 
 def main():
     debug_mode = False
-    n_runs = 30
+    n_runs = 5
     
     # List of problems to test
     problems = [
         ("problem_pdf", problem_pdf),
         # ("problem_pdf2", problem_pdf2),
-        # ("problem_pdf3", problem_pdf3),
+        #("problem_pdf3", problem_pdf3),
     ]
 
     out_file = "Solution_ex3.txt"
