@@ -11,6 +11,7 @@ class Controller:
     """
     RL-Adaptive Controller for Assignment 3.
     Adapts Ex2 planning logic to handle hidden probabilities and rewards.
+    Now includes dynamic probability estimation based on observed action outcomes.
     """
 
     def __init__(self, game: ext_plant.Game):
@@ -26,19 +27,19 @@ class Controller:
         self.max_caps = game.get_capacities()
 
         # --- 2. Handling Hidden Information (Assignment 3 Changes) ---
-        # We cannot access 'robot_chosen_action_prob' or 'plants_reward' directly.
-        
-        # A. Reward Estimation: Use Max Reward as the utility proxy
-        # The game provides a specific getter for this in Ex3.
         self.plant_values = game.get_plants_max_reward()
         
-        # B. Probability Estimation: Assume a default model
-        # Since we don't know who is broken, we assume a "Standard" success rate.
-        # 0.85 is chosen as a balance between optimism (planning long paths) 
-        # and caution (expecting some failure).
-        self.assumed_prob = 0.85
+        # Initialize Robot Statistics for Probability Estimation
+        # Structure: {robot_id: {'success': count, 'total': count}}
+        # We start with a "Prior" belief. 
+        # Being slightly optimistic (Beta(4, 1) -> 0.8) helps exploration early on.
         self.robot_ids = list(self.problem_config["Robots"].keys())
+        self.robot_stats = {rid: {'success': 4, 'total': 5} for rid in self.robot_ids}
         
+        # State tracking for learning
+        self.last_state = None
+        self.last_action = None
+
         # --- 3. Pre-computations ---
         self.targets = set(self.problem_config.get("Plants", {}).keys()) | \
                        set(self.problem_config.get("Taps", {}).keys())
@@ -61,8 +62,12 @@ class Controller:
     def choose_next_action(self, state):
         """
         Decides the next action using Iterative Deepening Expectimax
-        based on the estimated model.
+        based on the dynamically estimated model.
         """
+        # 0. Update Model based on previous action's result
+        if self.last_state and self.last_action and self.last_action != "RESET":
+            self._update_model(self.last_state, self.last_action, state)
+
         # 1. Calibration (Run once)
         if not self.dynamic_initialized:
             self._calibrate_thresholds()
@@ -72,14 +77,97 @@ class Controller:
         time_rem = self.time_limit - step
         
         # 2. Reset Logic
-        # If we are performing significantly worse than the baseline efficiency, RESET.
         if self._should_trigger_reset(state, time_rem):
+            self.last_action = "RESET"
+            self.last_state = state
             return "RESET"
 
         # 3. Algorithm Selection
-        # In Ex3, without knowing probs, we default to the Efficiency Strategy
-        # which uses time-bound Iterative Deepening.
-        return self._search_efficiency_strategy(state, time_rem)
+        decision = self._search_efficiency_strategy(state, time_rem)
+        
+        # 4. Save state for next learning step
+        self.last_action = decision
+        self.last_state = state
+        
+        return decision
+
+    # =========================================================================
+    #       LEARNING & PROBABILITY ESTIMATION
+    # =========================================================================
+
+    def _get_estimated_prob(self, rid):
+        """Returns the smoothed probability of success for a specific robot."""
+        stats = self.robot_stats.get(rid, {'success': 4, 'total': 5})
+        # Laplace smoothing / Beta mean
+        return stats['success'] / stats['total']
+
+    def _update_model(self, prev_state, action, curr_state):
+        """
+        Compares previous state and current state to determine if the action
+        succeeded or failed, then updates the robot's statistics.
+        """
+        try:
+            prev_robots, prev_plants, prev_taps, prev_total_need = prev_state
+            curr_robots, curr_plants, curr_taps, curr_total_need = curr_state
+
+            # --- FIX: DETECT AUTOMATIC RESET ---
+            # If the total need INCREASED, the environment reset automatically.
+            # We cannot use this transition to estimate probabilities because 
+            # the state change wasn't caused by physics, but by the game rules.
+            if curr_total_need > prev_total_need:
+                return
+            # -----------------------------------
+
+            parts = action.split()
+            atype = parts[0]
+            rid = int(parts[1].strip("()"))
+            
+            # Helper to get specific robot/plant data
+            def get_r(s_robots, r_id):
+                return next(r for r in s_robots if r[0] == r_id)
+            
+            r_prev = get_r(prev_robots, rid)
+            r_curr = get_r(curr_robots, rid)
+            
+            success = False
+            
+            if atype in ["UP", "DOWN", "LEFT", "RIGHT"]:
+                # Success: Robot moved to the intended cell
+                dr, dc = {"UP":(-1,0), "DOWN":(1,0), "LEFT":(0,-1), "RIGHT":(0,1)}[atype]
+                expected_pos = (r_prev[1][0] + dr, r_prev[1][1] + dc)
+                if r_curr[1] == expected_pos:
+                    success = True
+                else:
+                    success = False 
+                    
+            elif atype == "LOAD":
+                # Success: Load increased
+                if r_curr[2] > r_prev[2]:
+                    success = True
+                else:
+                    success = False
+                    
+            elif atype == "POUR":
+                # Success: Plant need decreased
+                r_pos = r_prev[1]
+                p_prev_need = next((p[1] for p in prev_plants if p[0] == r_pos), 0)
+                p_curr_need = next((p[1] for p in curr_plants if p[0] == r_pos), 0)
+                
+                # If plant disappeared (need 0) or need reduced
+                plant_reduced = p_curr_need < p_prev_need
+                
+                if plant_reduced:
+                    success = True
+                else:
+                    success = False
+
+            # Update Stats
+            self.robot_stats[rid]['total'] += 1
+            if success:
+                self.robot_stats[rid]['success'] += 1
+                
+        except Exception:
+            pass
 
     # =========================================================================
     #       CORE SEARCH ALGORITHMS
@@ -88,12 +176,10 @@ class Controller:
     def _search_efficiency_strategy(self, state, time_left):
         """
         Iterative Deepening Search.
-        Adapted for Ex3 to use assumed probabilities.
         """
         valid_moves = self._get_valid_moves(state)
         if not valid_moves: return "RESET"
         
-        # Prune moves that are obviously bad (loading when full, etc)
         candidates = self._prune_moves(state, valid_moves, time_left)
         if not candidates: return "RESET"
 
@@ -130,7 +216,6 @@ class Controller:
                 if completed_level and curr_best: 
                     best_acts = curr_best
                 
-                # Hard timeout
                 if not completed_level: break
                 
         except TimeoutError:
@@ -138,7 +223,6 @@ class Controller:
             
         if not best_acts: return "RESET"
         
-        # Tie-breaker: Prefer POURing to immediate rewards
         pours = [a for a in best_acts if "POUR" in a]
         return random.choice(pours) if pours else random.choice(best_acts)
 
@@ -146,49 +230,45 @@ class Controller:
         """
         Calculates the Expectimax value of a specific action node.
         """
-        # Timeout Check
         if (time.time() - t_start) > (t_limit * 1.5): raise TimeoutError()
 
-        # Deterministic Shortcut:
-        # If depth is shallow, treat as deterministic to save time.
-        # In Ex3, since we assume 0.85, we can skip stochastic calc for depth 1.
-        is_det = (depth <= 1)
+        # Shallow depth optimization: treat high-prob robots as deterministic for speed
+        rid = -1
+        try:
+            if "RESET" not in action:
+                rid = int(action.split()[1].strip("()"))
+        except: pass
+
+        prob = self._get_estimated_prob(rid) if rid != -1 else 1.0
+        
+        # If very confident or shallow, run deterministic simulation
+        is_det = (depth <= 1) or (prob > 0.95 and depth < 4)
         
         transitions = self._simulate_transition(state, action, deterministic=is_det)
         avg_score = 0
         
         for next_s, p, r in transitions:
-            # Recursive step
             recurse_val = self._recursive_expectimax(next_s, depth - 1, time_left - 1, t_start, t_limit)
-            
-            # Bellman Equation with decay
             avg_score += p * (r + (0.999 * recurse_val))
             
         return avg_score
 
     def _recursive_expectimax(self, state, depth, time_left, t_start, t_limit):
-        """
-        Recursive helper for Expectimax.
-        """
         if (time.time() - t_start) > (t_limit * 1.2): raise TimeoutError()
         
-        # Memoization
         key = (state, depth, time_left)
         if key in self.memo_table: return self.memo_table[key]
 
         _, _, _, total_need = state
         
-        # Terminal States
         if total_need == 0: return self.goal_bonus + 1000
         if time_left <= 0: return -1000
         
-        # Leaf Node
         if depth == 0: return self._heuristic_utility(state, time_left)
 
         valid = self._get_valid_moves(state)
         if not valid: return self._heuristic_utility(state, time_left)
         
-        # Pruning inside recursion
         cands = self._prune_moves(state, valid, time_left)
         if not cands: return self._heuristic_utility(state, time_left)
         
@@ -205,31 +285,91 @@ class Controller:
     # =========================================================================
 
     def _heuristic_utility(self, state, time_left):
-        """
-        Estimates the value of a state based on distance and potential reward.
-        Modified for Ex3 to use estimated Probabilities and Max Rewards.
-        """
         robots, plants, taps, total_need = state
         score = 0
         
         active_taps = [pos for pos, amt in taps if amt > 0]
-        
-        dist_penalty = 0
         max_dist_obs = 0
+        dist_penalty = 0
+
+        # --- 1. SEPARATION PENALTY ---
+        robot_positions = [r[1] for r in robots]
+        for i in range(len(robot_positions)):
+            for j in range(i + 1, len(robot_positions)):
+                r1 = robot_positions[i]
+                r2 = robot_positions[j]
+                d_bots = abs(r1[0] - r2[0]) + abs(r1[1] - r2[1])
+                if d_bots <= 1: score -= 2000.0
+                elif d_bots <= 2: score -= 500.0
+
+        # --- 2. CORRIDOR & GATE BLOCKAGE DETECTION (FIXED) ---
+        robot_map = {r[1]: r[0] for r in robots}
         
+        for rid, r_pos, load in robots:
+            # Only apply to the "Main Carrier"
+            if load < 5: continue 
+
+            # Find target
+            target_plant = None
+            min_d = 999
+            for p_pos, need in plants:
+                if need > 0:
+                    d = self._get_dist(r_pos, p_pos)
+                    if d < min_d:
+                        min_d = d
+                        target_plant = p_pos
+            
+            if target_plant:
+                # A. STRICT LEFT CORRIDOR LOGIC (For New 3 Map)
+                # If target is in Col 0 (The Tunnel), checks if ANYONE else is in Col 0 or Col 1.
+                if target_plant[1] == 0:
+                    tunnel_occupied = False
+                    for other_r_pos in robot_map:
+                        # If another robot is in Col 0 or Col 1
+                        if other_r_pos != r_pos and other_r_pos[1] <= 1:
+                            tunnel_occupied = True
+                            break
+                    
+                    # If tunnel is busy, I MUST stay back in Col 2 or higher.
+                    # Entering Col 1 (The Gate) or Col 0 is forbidden.
+                    if tunnel_occupied:
+                        if r_pos[1] <= 1:
+                            score -= 5000.0 # GET OUT OF THE GATE!
+                
+                # B. Standard Line-of-Sight Blockage (For other maps)
+                # Vertical
+                if r_pos[1] == target_plant[1]: 
+                    min_r, max_r = min(r_pos[0], target_plant[0]), max(r_pos[0], target_plant[0])
+                    for r_check in range(min_r + 1, max_r):
+                        if (r_check, r_pos[1]) in robot_map:
+                            score -= 5000.0
+                # Horizontal
+                elif r_pos[0] == target_plant[0]: 
+                    min_c, max_c = min(r_pos[1], target_plant[1]), max(r_pos[1], target_plant[1])
+                    for c_check in range(min_c + 1, max_c):
+                        if (r_pos[0], c_check) in robot_map:
+                            score -= 5000.0
+        # -------------------------------------------
+        
+        # --- 3. DISTANCE & EVACUATION ---
         for p_pos, need in plants:
             if need <= 0: continue
-            # Use MAX REWARD as the heuristic value
             p_val = self.plant_values.get(p_pos, 0)
             
             min_dist = 999
-            
             for rid, r_pos, load in robots:
+                # Evacuation Logic
+                cap = self.max_caps.get(rid, 0)
+                if total_need > 5 and cap < 3:
+                    safe_row = 5
+                    dist_to_safe = abs(r_pos[0] - safe_row)
+                    score -= (dist_to_safe * 200.0) 
+                    continue
+
                 curr_dist = 999
                 if load > 0:
                     curr_dist = self._get_dist(r_pos, p_pos)
                 elif active_taps:
-                    # Dist to tap + Dist to plant
                     to_tap = 999
                     best_tap = None
                     for t in active_taps:
@@ -243,9 +383,7 @@ class Controller:
                 if curr_dist < min_dist:
                     min_dist = curr_dist
             
-            # Penalize long distances heavily
-            if min_dist >= 900:
-                dist_penalty += 1000
+            if min_dist >= 900: dist_penalty += 1000
             else:
                 dist_penalty += min_dist
                 if min_dist > max_dist_obs: max_dist_obs = min_dist
@@ -253,40 +391,24 @@ class Controller:
             score += (need * p_val)
 
         score -= (total_need * 50)
-        
-        # Apply distance costs
         metric = dist_penalty + max_dist_obs
         score -= (metric * 2.0)
         
-        # Hoarding Logic (Encourage carrying water)
+        # --- 4. RESOURCE HEURISTIC ---
         hoard_val = 25.0
-        target_need = 999
-        
-        # "Farming Mode" adjustment (focusing heavily on one plant)
+        target_need = total_need 
         if self.reset_threshold <= 0.05:
             hoard_val = 15.0
-            target_need = getattr(self, 'focus_need', 999)
-            if target_need == 0:
-                 target_need = max(self.initial_needs.values()) if self.initial_needs else 999
+            if any(r[1] in [t[0] for t in taps] for r in robots):
+                 target_need = max(target_need, 20) 
 
         for rid, r_pos, load in robots:
-            # Use Assumed Probability (0.85)
-            prob = self.assumed_prob
-            
+            prob = self._get_estimated_prob(rid)
             usable = min(load, time_left)
             usable = min(usable, target_need)
-            
-            r_val = hoard_val
-            if self.reset_threshold <= 0.05 and hasattr(self, 'focus_robot'):
-                if rid != self.focus_robot:
-                    r_val = 0.0
-            
-            score += usable * r_val * prob
-            
-            # Over-hoarding penalty
-            if self.reset_threshold <= 0.05:
-                if load > target_need:
-                    score -= 5000.0
+            score += usable * hoard_val * prob
+            if load > target_need:
+                score -= 50.0 * (load - target_need)
 
         return score
 
@@ -296,13 +418,10 @@ class Controller:
 
     def _calibrate_thresholds(self):
         """
-        Determines if we should enter "Farming Mode" (Focus one robot on one plant).
-        Uses assumed probabilities and max rewards.
+        Determines farming mode using initial estimates.
         """
         # 1. Estimate General Mission Efficiency
         total_pot = sum(n * self.plant_values.get(p, 0) for p, n in self.initial_needs.items())
-        denom = self.goal_bonus + total_pot + 0.1
-        
         fleet_cap = sum(self.max_caps.get(rid, 0) for rid in self.robot_ids) or 1
         avg_dist = (self.grid_h + self.grid_w) / 2.0
         tot_need = sum(self.initial_needs.values())
@@ -317,8 +436,6 @@ class Controller:
         
         for p_pos, need in self.initial_needs.items():
             val = self.plant_values.get(p_pos, 0)
-            
-            # Estimate distance to nearest tap
             tap_dist = avg_dist
             if p_pos in self.dist_cache:
                 dists = [self.dist_cache[p_pos].get(t[0], 999) for t in self.initial_state[2]]
@@ -327,11 +444,10 @@ class Controller:
             for rid in self.robot_ids:
                 rcap = self.max_caps.get(rid, 1) or 1
                 cycles = max(need / rcap, 1)
-                
                 steps = 3 + (cycles * 2 * tap_dist) + (2 * need)
                 
-                # Use Assumed Probability
-                prob = self.assumed_prob
+                # Use current estimate
+                prob = self._get_estimated_prob(rid)
                 exp_steps = steps / prob
                 
                 eff = (val * need) / exp_steps
@@ -342,16 +458,16 @@ class Controller:
                     self.focus_robot = rid
 
         if max_farm_eff > est_miss_eff:
-            self.reset_threshold = 0.05  # Trigger Farming Mode
+            self.reset_threshold = 0.05
         else:
-            self.reset_threshold = 0.15  # Normal Mode
+            self.reset_threshold = 0.15
             
-        # Store baseline for Reset checks
         self.baseline_route_val = self._get_best_efficiency(self.initial_state, self.time_limit)[0]
 
     def _should_trigger_reset(self, state, time_left):
-        """Decides if current performance is so bad compared to baseline that we should RESET."""
-        if time_left < 5: return False
+        min_safe_horizon = (self.grid_h + self.grid_w) * 1.5 
+        if time_left < min_safe_horizon: 
+            return False
         
         reset_eff, _ = self._get_best_efficiency(self.initial_state, time_left - 1)
         curr_eff, _ = self._get_best_efficiency(state, time_left)
@@ -378,7 +494,10 @@ class Controller:
         return False
 
     def _get_best_efficiency(self, state, time_left):
-        """Calculates (reward / steps) for best possible single delivery."""
+        """
+        Estimates the best possible efficiency (Reward / Step) achievable from
+        the current state given the time remaining.
+        """
         robots, plants, taps, _ = state
         active_taps = [p for p, a in taps if a > 0]
         
@@ -387,11 +506,11 @@ class Controller:
         
         for rid, r_pos, load in robots:
             cap = self.max_caps.get(rid, 0)
-            
+            # Dynamic Prob
+            prob = self._get_estimated_prob(rid)
+
             for p_pos, need in plants:
                 if need <= 0: continue
-                
-                # Use MAX reward
                 avg = self.plant_values.get(p_pos, 0)
                 
                 # Case 1: Deliver current load
@@ -399,17 +518,20 @@ class Controller:
                     dist = self._get_dist(r_pos, p_pos)
                     amt = min(need, load)
                     steps = dist + amt
+                    # Adjust steps by probability to get expected time cost
+                    eff_steps = steps / prob
                     
                     if steps <= time_left and steps < 900:
                         rew = amt * avg
+                        # Goal reward approximation
                         if (state[3] - amt) <= 0: rew += self.goal_bonus
                         
-                        eff = rew / (steps + 2.2)
+                        eff = rew / (eff_steps + 2.2) # +2.2 is a heuristic base cost
                         if eff > best_e:
                             best_e = eff
                             best_a = f"POUR ({rid})" if dist == 0 else self._move_towards(r_pos, p_pos, rid)
 
-                # Case 2: Fill then Deliver
+                # Case 2: Fill at tap then Deliver
                 if load < cap and active_taps:
                     min_t_dist = 999
                     best_t = None
@@ -431,11 +553,13 @@ class Controller:
                             final_del = min(need, final_l)
                             
                             steps_tot = min_t_dist + amt_load + d_plant + final_del
+                            eff_steps = steps_tot / prob
+                            
                             if steps_tot <= time_left and steps_tot < 900:
                                 rew = final_del * avg
                                 if (state[3] - final_del) <= 0: rew += self.goal_bonus
                                 
-                                eff = rew / (steps_tot + 2.2)
+                                eff = rew / (eff_steps + 2.2)
                                 if eff > best_e:
                                     best_e = eff
                                     best_a = f"LOAD ({rid})" if min_t_dist == 0 else self._move_towards(r_pos, best_t, rid)
@@ -446,18 +570,14 @@ class Controller:
     # =========================================================================
 
     def _simulate_transition(self, state, action, deterministic=False):
-        """
-        Simulates state transition.
-        CRITICAL EX3 CHANGE: Uses self.assumed_prob instead of reading unknown props.
-        """
         if action == "RESET": return [(self.initial_state, 1.0, 0)]
         
         parts = action.split()
         atype = parts[0]
         rid = int(parts[1].strip("()"))
         
-        # Use Assumed Model Probability
-        prob = self.assumed_prob
+        # Use Learned Probability
+        prob = self._get_estimated_prob(rid)
         
         outcomes = []
         
@@ -514,7 +634,6 @@ class Controller:
             
         elif atype == "POUR":
             if success:
-                # Find plant
                 pidx = -1
                 for i, p in enumerate(pl):
                     if p[0] == (r, c):
@@ -523,7 +642,6 @@ class Controller:
                 
                 if pidx != -1:
                     ppos, pneed = pl[pidx]
-                    # We only know MAX reward in Ex3, so we use that for planning
                     val = self.plant_values.get(ppos, 0)
                     rew = val
                     
@@ -543,11 +661,10 @@ class Controller:
         return (tuple(rl), tuple(pl), tuple(tl), tot_need), rew
 
     # =========================================================================
-    #       UTILITIES (Parsing, Pruning, BFS)
+    #       UTILITIES
     # =========================================================================
 
     def _parse_initial_state(self):
-        """Converts problem dict to state tuple."""
         r_list = []
         for rid, d in self.problem_config["Robots"].items():
             r_list.append((rid, (d[0], d[1]), d[2]))
@@ -567,7 +684,6 @@ class Controller:
         return (tuple(r_list), tuple(p_list), tuple(t_list), tot)
 
     def _generate_flood_map(self, start):
-        """BFS Flood fill."""
         q = collections.deque([(start, 0)])
         visited = {start: 0}
         dirs = [(-1, 0), (1, 0), (0, -1), (0, 1)]
@@ -668,7 +784,6 @@ class Controller:
                 for act, d in moves:
                     if d <= best: final.append(act)
         
-        # Sort by load + expectation
         def rank(act):
             if act == "RESET": return -999
             try:
@@ -676,8 +791,8 @@ class Controller:
                 if rid not in rmap: return 0
                 _, l = rmap[rid]
                 c = self.max_caps.get(rid, 1)
-                # Use Assumed Prob
-                p = self.assumed_prob
+                # Use Learned Prob
+                p = self._get_estimated_prob(rid)
                 return l + (c * p)
             except: return 0
 
@@ -704,7 +819,6 @@ class Controller:
                 legal.append(f"LOAD ({rid})")
             
             # Pour
-            # Note: We check if it's a valid plant location, even if reward list is hidden
             if (r, c) in plocs and load > 0:
                 legal.append(f"POUR ({rid})")
         

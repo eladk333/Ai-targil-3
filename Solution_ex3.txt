@@ -1,4 +1,4 @@
 Averages per problem (n_runs = 5)
 ==================================================
 
-problem_pdf: reward_average=47.600000 | time_average=30.712245s
+problem_pdf3: reward_average=45.600000 | time_average=12.232117s

@@ -88,9 +88,9 @@ def main():
     
     # List of problems to test
     problems = [
-        ("problem_pdf", problem_pdf),
+        #("problem_pdf", problem_pdf),
         # ("problem_pdf2", problem_pdf2),
-        #("problem_pdf3", problem_pdf3),
+        ("problem_pdf3", problem_pdf3),
     ]
 
     out_file = "Solution_ex3.txt"

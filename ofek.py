@@ -718,34 +718,34 @@ def main():
 
     # Keep the same problem list as before
     problems = [
-        ("problem_pdf", problem_pdf),
-        ("problem_pdf2", problem_pdf2),
-        ("problem_pdf3", problem_pdf3),
-        ("problem_new1_version1", problem_new1_version1),
-        ("problem_new1_version2", problem_new1_version2),
-        ("problem_new1_version3", problem_new1_version3),
-        ("problem_new2_version1", problem_new2_version1),
-        ("problem_new2_version2", problem_new2_version2),
-        ("problem_new2_version3", problem_new2_version3),
-        ("problem_new2_version4", problem_new2_version4),
+        # ("problem_pdf", problem_pdf),
+        # ("problem_pdf2", problem_pdf2),
+        # ("problem_pdf3", problem_pdf3),
+        # ("problem_new1_version1", problem_new1_version1),
+        # ("problem_new1_version2", problem_new1_version2),
+        # ("problem_new1_version3", problem_new1_version3),
+        # ("problem_new2_version1", problem_new2_version1),
+        # ("problem_new2_version2", problem_new2_version2),
+        # ("problem_new2_version3", problem_new2_version3),
+        # ("problem_new2_version4", problem_new2_version4),
         ("problem_new3_version1", problem_new3_version1),
-        ("problem_new3_version2", problem_new3_version2),
-        ("problem_new3_version3", problem_new3_version3),
-        ("problem_new4_version1", problem_new4_version1),
-        ("problem_new4_version2", problem_new4_version2),
+        # ("problem_new3_version2", problem_new3_version2),
+        # ("problem_new3_version3", problem_new3_version3),
+        # ("problem_new4_version1", problem_new4_version1),
+        # ("problem_new4_version2", problem_new4_version2),
     ]
 
     # Official baselines (🟩) provided by user
     official_baseline_map = {
         "problem_pdf": (44.0, 0.0),
-        # "problem_pdf3": (37.0, 0.0),
-        # "problem_new1_version1": (83.0, 0.0),
-        # "problem_new1_version3": (57.0, 0.0),
-        # "problem_new2_version1": (85.0, 0.0),
-        # "problem_new2_version3": (88.0, 0.0),
-        # "problem_new3_version1": (71.0, 0.0),
-        # "problem_new3_version2": (20.0, 0.0),
-        # "problem_new4_version1": (35.0, 0.0),
+        "problem_pdf3": (37.0, 0.0),
+        "problem_new1_version1": (83.0, 0.0),
+        "problem_new1_version3": (57.0, 0.0),
+        "problem_new2_version1": (85.0, 0.0),
+        "problem_new2_version3": (88.0, 0.0),
+        "problem_new3_version1": (71.0, 0.0),
+        "problem_new3_version2": (20.0, 0.0),
+        "problem_new4_version1": (35.0, 0.0),
     }
 
     # Estimated baselines (⬜) — kept for comparison but marked as estimated
