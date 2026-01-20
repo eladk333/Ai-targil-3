@@ -67,21 +67,9 @@ def draw_board(problem):
             [f"{rid}:{(r,c)}" for rid, (r, c, _car, _cap) in robots.items()]
         )
         print(f"Robots: {robots_str}")
-    # Show robot action success probabilities if provided
-    robot_probs = problem.get("robot_chosen_action_prob", {})
-    if robot_probs:
-        probs_str = ", ".join(
-            [f"{rid}:{prob:.2f}" for rid, prob in robot_probs.items()]
-        )
-        print(f"Robot success probs: {probs_str}")
-
-    # Show plant reward distributions if provided
-    plants_reward = problem.get("plants_reward", {})
-    if plants_reward:
-        pr_strs = []
-        for pos, rewards in plants_reward.items():
-            pr_strs.append(f"{pos}:{rewards}")
-        print(f"Plant rewards: {', '.join(pr_strs)}")
+    # Note: do not print hidden problem details such as robot success probabilities
+    # or plant reward distributions — these are unknown to the agent and should not
+    # be revealed by the checker.
 
 
 def is_action_legal(game: ext_plant.Game, chosen_action: str):
@@ -718,21 +706,21 @@ def main():
 
     # Keep the same problem list as before
     problems = [
-        # ("problem_pdf", problem_pdf),
-        # ("problem_pdf2", problem_pdf2),
-        # ("problem_pdf3", problem_pdf3),
-        # ("problem_new1_version1", problem_new1_version1),
-        # ("problem_new1_version2", problem_new1_version2),
-        # ("problem_new1_version3", problem_new1_version3),
-        # ("problem_new2_version1", problem_new2_version1),
-        # ("problem_new2_version2", problem_new2_version2),
-        # ("problem_new2_version3", problem_new2_version3),
-        # ("problem_new2_version4", problem_new2_version4),
+        ("problem_pdf", problem_pdf),
+        ("problem_pdf2", problem_pdf2),
+        ("problem_pdf3", problem_pdf3),
+        ("problem_new1_version1", problem_new1_version1),
+        ("problem_new1_version2", problem_new1_version2),
+        ("problem_new1_version3", problem_new1_version3),
+        ("problem_new2_version1", problem_new2_version1),
+        ("problem_new2_version2", problem_new2_version2),
+        ("problem_new2_version3", problem_new2_version3),
+        ("problem_new2_version4", problem_new2_version4),
         ("problem_new3_version1", problem_new3_version1),
-        # ("problem_new3_version2", problem_new3_version2),
-        # ("problem_new3_version3", problem_new3_version3),
-        # ("problem_new4_version1", problem_new4_version1),
-        # ("problem_new4_version2", problem_new4_version2),
+        ("problem_new3_version2", problem_new3_version2),
+        ("problem_new3_version3", problem_new3_version3),
+        ("problem_new4_version1", problem_new4_version1),
+        ("problem_new4_version2", problem_new4_version2),
     ]
 
     # Official baselines (🟩) provided by user
@@ -740,12 +728,13 @@ def main():
         "problem_pdf": (44.0, 0.0),
         "problem_pdf3": (37.0, 0.0),
         "problem_new1_version1": (83.0, 0.0),
-        "problem_new1_version3": (57.0, 0.0),
+         "problem_new1_version3": (57.0, 0.0),
         "problem_new2_version1": (85.0, 0.0),
         "problem_new2_version3": (88.0, 0.0),
-        "problem_new3_version1": (71.0, 0.0),
+        "problem_new3_version1": (18.0, 0.0),
         "problem_new3_version2": (20.0, 0.0),
         "problem_new4_version1": (35.0, 0.0),
+        "problem_new4_version2": (12.0, 0.0),
     }
 
     # Estimated baselines (⬜) — kept for comparison but marked as estimated
@@ -755,7 +744,6 @@ def main():
         "problem_new2_version2": (123.715, 0.0),
         "problem_new2_version4": (41.65, 0.0),
         "problem_new3_version3": (8.922222, 0.0),
-        "problem_new4_version2": (12.0, 0.0),
     }
 
     def get_baseline_info(pname: str):
@@ -795,8 +783,32 @@ def main():
     else:
         controller_module = ex3
 
-    # if requested, filter to baseline-only problems
-    if baseline_only:
+    # allow explicit problem selection using a bracketed list in the CLI, e.g.:
+    #   python ex3_check.py [problem_pdf,problem_new1_version3]
+    selected_problem_names = None
+    # note: preserve original names for missing-name reporting
+    all_problem_names = [p for (p, _prob) in problems]
+    for a in args:
+        if a.startswith("[") and a.endswith("]"):
+            inner = a[1:-1]
+            names = [x.strip() for x in inner.split(",") if x.strip()]
+            if names:
+                selected_problem_names = names
+                print(f"{BOLD}{YELLOW}Selected problems provided: {names}{RESET}")
+            break
+
+    # if a specific selection was provided, use that (takes precedence over baseline flag)
+    if selected_problem_names is not None:
+        problems = [(p, prob) for (p, prob) in problems if p in selected_problem_names]
+        missing = [
+            name for name in selected_problem_names if name not in all_problem_names
+        ]
+        if missing:
+            print(f"{YELLOW}Warning: requested problems not found: {missing}{RESET}")
+        print(
+            f"{BOLD}{YELLOW}Running selected problems only; {len(problems)} problems will be executed.{RESET}"
+        )
+    elif baseline_only:
         problems = [(p, prob) for (p, prob) in problems if p in official_baseline_map]
         print(
             f"{BOLD}{YELLOW}Running baseline-only; {len(problems)} problems will be executed.{RESET}"

@@ -10,8 +10,7 @@ id = ["322587064"]
 class Controller:
     """
     RL-Adaptive Controller for Assignment 3.
-    Adapts Ex2 planning logic to handle hidden probabilities and rewards.
-    Now includes dynamic probability estimation based on observed action outcomes.
+    Optimized for execution speed (removed string parsing in hot loops).
     """
 
     def __init__(self, game: ext_plant.Game):
@@ -26,20 +25,11 @@ class Controller:
         self.time_limit = self.problem_config["horizon"]
         self.max_caps = game.get_capacities()
 
-        # --- 2. Handling Hidden Information (Assignment 3 Changes) ---
+        # --- 2. Handling Hidden Information ---
         self.plant_values = game.get_plants_max_reward()
-        
-        # Initialize Robot Statistics for Probability Estimation
-        # Structure: {robot_id: {'success': count, 'total': count}}
-        # We start with a "Prior" belief. 
-        # Being slightly optimistic (Beta(4, 1) -> 0.8) helps exploration early on.
+        self.assumed_prob = 0.85
         self.robot_ids = list(self.problem_config["Robots"].keys())
-        self.robot_stats = {rid: {'success': 4, 'total': 5} for rid in self.robot_ids}
         
-        # State tracking for learning
-        self.last_state = None
-        self.last_action = None
-
         # --- 3. Pre-computations ---
         self.targets = set(self.problem_config.get("Plants", {}).keys()) | \
                        set(self.problem_config.get("Taps", {}).keys())
@@ -61,13 +51,8 @@ class Controller:
 
     def choose_next_action(self, state):
         """
-        Decides the next action using Iterative Deepening Expectimax
-        based on the dynamically estimated model.
+        Decides the next action using Iterative Deepening Expectimax.
         """
-        # 0. Update Model based on previous action's result
-        if self.last_state and self.last_action and self.last_action != "RESET":
-            self._update_model(self.last_state, self.last_action, state)
-
         # 1. Calibration (Run once)
         if not self.dynamic_initialized:
             self._calibrate_thresholds()
@@ -78,96 +63,16 @@ class Controller:
         
         # 2. Reset Logic
         if self._should_trigger_reset(state, time_rem):
-            self.last_action = "RESET"
-            self.last_state = state
             return "RESET"
 
         # 3. Algorithm Selection
-        decision = self._search_efficiency_strategy(state, time_rem)
+        # Returns the string representation from the selected tuple
+        best_tuple = self._search_efficiency_strategy(state, time_rem)
         
-        # 4. Save state for next learning step
-        self.last_action = decision
-        self.last_state = state
+        if best_tuple == "RESET": return "RESET"
         
-        return decision
-
-    # =========================================================================
-    #       LEARNING & PROBABILITY ESTIMATION
-    # =========================================================================
-
-    def _get_estimated_prob(self, rid):
-        """Returns the smoothed probability of success for a specific robot."""
-        stats = self.robot_stats.get(rid, {'success': 4, 'total': 5})
-        # Laplace smoothing / Beta mean
-        return stats['success'] / stats['total']
-
-    def _update_model(self, prev_state, action, curr_state):
-        """
-        Compares previous state and current state to determine if the action
-        succeeded or failed, then updates the robot's statistics.
-        """
-        try:
-            prev_robots, prev_plants, prev_taps, prev_total_need = prev_state
-            curr_robots, curr_plants, curr_taps, curr_total_need = curr_state
-
-            # --- FIX: DETECT AUTOMATIC RESET ---
-            # If the total need INCREASED, the environment reset automatically.
-            # We cannot use this transition to estimate probabilities because 
-            # the state change wasn't caused by physics, but by the game rules.
-            if curr_total_need > prev_total_need:
-                return
-            # -----------------------------------
-
-            parts = action.split()
-            atype = parts[0]
-            rid = int(parts[1].strip("()"))
-            
-            # Helper to get specific robot/plant data
-            def get_r(s_robots, r_id):
-                return next(r for r in s_robots if r[0] == r_id)
-            
-            r_prev = get_r(prev_robots, rid)
-            r_curr = get_r(curr_robots, rid)
-            
-            success = False
-            
-            if atype in ["UP", "DOWN", "LEFT", "RIGHT"]:
-                # Success: Robot moved to the intended cell
-                dr, dc = {"UP":(-1,0), "DOWN":(1,0), "LEFT":(0,-1), "RIGHT":(0,1)}[atype]
-                expected_pos = (r_prev[1][0] + dr, r_prev[1][1] + dc)
-                if r_curr[1] == expected_pos:
-                    success = True
-                else:
-                    success = False 
-                    
-            elif atype == "LOAD":
-                # Success: Load increased
-                if r_curr[2] > r_prev[2]:
-                    success = True
-                else:
-                    success = False
-                    
-            elif atype == "POUR":
-                # Success: Plant need decreased
-                r_pos = r_prev[1]
-                p_prev_need = next((p[1] for p in prev_plants if p[0] == r_pos), 0)
-                p_curr_need = next((p[1] for p in curr_plants if p[0] == r_pos), 0)
-                
-                # If plant disappeared (need 0) or need reduced
-                plant_reduced = p_curr_need < p_prev_need
-                
-                if plant_reduced:
-                    success = True
-                else:
-                    success = False
-
-            # Update Stats
-            self.robot_stats[rid]['total'] += 1
-            if success:
-                self.robot_stats[rid]['success'] += 1
-                
-        except Exception:
-            pass
+        # best_tuple is (action_type, rid, action_string)
+        return best_tuple[2]
 
     # =========================================================================
     #       CORE SEARCH ALGORITHMS
@@ -180,14 +85,15 @@ class Controller:
         valid_moves = self._get_valid_moves(state)
         if not valid_moves: return "RESET"
         
+        # Prune moves
         candidates = self._prune_moves(state, valid_moves, time_left)
         if not candidates: return "RESET"
 
         t_start = time.time()
-        # Time Management: Allocate time proportional to horizon urgency
+        # Time Management: slightly tighter buffer
         t_limit = 0.5 + (20.0 / self.time_limit)
         
-        best_acts = []
+        best_acts = [] # List of tuples
         
         try:
             # Iterative Deepening depth 1 to 20
@@ -198,24 +104,25 @@ class Controller:
                 curr_max = float('-inf')
                 completed_level = True
                 
-                for action in candidates:
-                    # Timeout check
-                    if (time.time() - t_start) > (t_limit * 1.5) and depth > 2: 
+                for action_tuple in candidates:
+                    # Tighter Timeout check to prevent overruns
+                    if (time.time() - t_start) > (t_limit * 1.1) and depth > 1: 
                         completed_level = False
                         break
                     
-                    # Call Evaluation
-                    val = self._calculate_node_value(state, action, depth, time_left, t_start, t_limit)
+                    # Call Evaluation with tuple
+                    val = self._calculate_node_value(state, action_tuple, depth, time_left, t_start, t_limit)
                     
                     if val > curr_max:
                         curr_max = val
-                        curr_best = [action]
+                        curr_best = [action_tuple]
                     elif val == curr_max:
-                        curr_best.append(action)
+                        curr_best.append(action_tuple)
                 
                 if completed_level and curr_best: 
                     best_acts = curr_best
                 
+                # Hard timeout
                 if not completed_level: break
                 
         except TimeoutError:
@@ -223,28 +130,22 @@ class Controller:
             
         if not best_acts: return "RESET"
         
-        pours = [a for a in best_acts if "POUR" in a]
+        # Tie-breaker: Prefer POURing
+        # action_tuple[0] is the action type (e.g. "POUR")
+        pours = [a for a in best_acts if a[0] == "POUR"]
         return random.choice(pours) if pours else random.choice(best_acts)
 
-    def _calculate_node_value(self, state, action, depth, time_left, t_start, t_limit):
+    def _calculate_node_value(self, state, action_tuple, depth, time_left, t_start, t_limit):
         """
         Calculates the Expectimax value of a specific action node.
         """
-        if (time.time() - t_start) > (t_limit * 1.5): raise TimeoutError()
+        # Timeout Check - Tighter tolerance (1.1x instead of 1.5x)
+        if (time.time() - t_start) > (t_limit * 1.1): raise TimeoutError()
 
-        # Shallow depth optimization: treat high-prob robots as deterministic for speed
-        rid = -1
-        try:
-            if "RESET" not in action:
-                rid = int(action.split()[1].strip("()"))
-        except: pass
-
-        prob = self._get_estimated_prob(rid) if rid != -1 else 1.0
+        is_det = (depth <= 1)
         
-        # If very confident or shallow, run deterministic simulation
-        is_det = (depth <= 1) or (prob > 0.95 and depth < 4)
-        
-        transitions = self._simulate_transition(state, action, deterministic=is_det)
+        # Pass tuple directly, no parsing needed
+        transitions = self._simulate_transition(state, action_tuple, deterministic=is_det)
         avg_score = 0
         
         for next_s, p, r in transitions:
@@ -254,8 +155,13 @@ class Controller:
         return avg_score
 
     def _recursive_expectimax(self, state, depth, time_left, t_start, t_limit):
-        if (time.time() - t_start) > (t_limit * 1.2): raise TimeoutError()
+        """
+        Recursive helper for Expectimax.
+        """
+        # Timeout Check - Tighter tolerance
+        if (time.time() - t_start) > (t_limit * 1.1): raise TimeoutError()
         
+        # Memoization
         key = (state, depth, time_left)
         if key in self.memo_table: return self.memo_table[key]
 
@@ -288,102 +194,75 @@ class Controller:
         robots, plants, taps, total_need = state
         score = 0
         
+        # Optimization: Filter active taps once
         active_taps = [pos for pos, amt in taps if amt > 0]
-        max_dist_obs = 0
+        
+        # Optimization: Pre-calculate robot-to-nearest-tap distances
+        # {rid: min_dist_to_any_tap}
+        robot_tap_dists = {}
+        if active_taps:
+            for rid, r_pos, _ in robots:
+                # Basic check to avoid empty sequence error
+                dists = [self._get_dist(r_pos, t) for t in active_taps]
+                robot_tap_dists[rid] = min(dists) if dists else 999
+        else:
+            for rid, r_pos, _ in robots:
+                robot_tap_dists[rid] = 999
+
         dist_penalty = 0
-
-        # --- 1. SEPARATION PENALTY ---
-        robot_positions = [r[1] for r in robots]
-        for i in range(len(robot_positions)):
-            for j in range(i + 1, len(robot_positions)):
-                r1 = robot_positions[i]
-                r2 = robot_positions[j]
-                d_bots = abs(r1[0] - r2[0]) + abs(r1[1] - r2[1])
-                if d_bots <= 1: score -= 2000.0
-                elif d_bots <= 2: score -= 500.0
-
-        # --- 2. CORRIDOR & GATE BLOCKAGE DETECTION (FIXED) ---
-        robot_map = {r[1]: r[0] for r in robots}
+        max_dist_obs = 0
         
-        for rid, r_pos, load in robots:
-            # Only apply to the "Main Carrier"
-            if load < 5: continue 
-
-            # Find target
-            target_plant = None
-            min_d = 999
-            for p_pos, need in plants:
-                if need > 0:
-                    d = self._get_dist(r_pos, p_pos)
-                    if d < min_d:
-                        min_d = d
-                        target_plant = p_pos
-            
-            if target_plant:
-                # A. STRICT LEFT CORRIDOR LOGIC (For New 3 Map)
-                # If target is in Col 0 (The Tunnel), checks if ANYONE else is in Col 0 or Col 1.
-                if target_plant[1] == 0:
-                    tunnel_occupied = False
-                    for other_r_pos in robot_map:
-                        # If another robot is in Col 0 or Col 1
-                        if other_r_pos != r_pos and other_r_pos[1] <= 1:
-                            tunnel_occupied = True
-                            break
-                    
-                    # If tunnel is busy, I MUST stay back in Col 2 or higher.
-                    # Entering Col 1 (The Gate) or Col 0 is forbidden.
-                    if tunnel_occupied:
-                        if r_pos[1] <= 1:
-                            score -= 5000.0 # GET OUT OF THE GATE!
-                
-                # B. Standard Line-of-Sight Blockage (For other maps)
-                # Vertical
-                if r_pos[1] == target_plant[1]: 
-                    min_r, max_r = min(r_pos[0], target_plant[0]), max(r_pos[0], target_plant[0])
-                    for r_check in range(min_r + 1, max_r):
-                        if (r_check, r_pos[1]) in robot_map:
-                            score -= 5000.0
-                # Horizontal
-                elif r_pos[0] == target_plant[0]: 
-                    min_c, max_c = min(r_pos[1], target_plant[1]), max(r_pos[1], target_plant[1])
-                    for c_check in range(min_c + 1, max_c):
-                        if (r_pos[0], c_check) in robot_map:
-                            score -= 5000.0
-        # -------------------------------------------
-        
-        # --- 3. DISTANCE & EVACUATION ---
         for p_pos, need in plants:
             if need <= 0: continue
             p_val = self.plant_values.get(p_pos, 0)
             
             min_dist = 999
+            
             for rid, r_pos, load in robots:
-                # Evacuation Logic
-                cap = self.max_caps.get(rid, 0)
-                if total_need > 5 and cap < 3:
-                    safe_row = 5
-                    dist_to_safe = abs(r_pos[0] - safe_row)
-                    score -= (dist_to_safe * 200.0) 
-                    continue
-
                 curr_dist = 999
                 if load > 0:
                     curr_dist = self._get_dist(r_pos, p_pos)
                 elif active_taps:
-                    to_tap = 999
-                    best_tap = None
-                    for t in active_taps:
-                        d = self._get_dist(r_pos, t)
-                        if d < to_tap:
-                            to_tap = d
-                            best_tap = t
-                    if best_tap:
-                        curr_dist = to_tap + self._get_dist(best_tap, p_pos)
+                    # Optimization: Use pre-calculated tap distance
+                    to_tap = robot_tap_dists.get(rid, 999)
+                    # We still need best tap for the plant dist, but we can approximate or
+                    # just use the nearest tap logic:
+                    # A better approximation without O(T) loop:
+                    # Dist(Robot->Tap) + Dist(Tap->Plant). 
+                    # To be perfectly accurate we still need the loop, but let's optimize:
+                    # Check the 'best_tap' for this plant in a separate pre-calc? 
+                    # For now, revert to loop if accuracy is needed, but limit it.
+                    # Given 'active_taps' is usually small (1-2), the loop is okay, 
+                    # but we can skip if to_tap is already huge.
+                    
+                    if to_tap < 900:
+                        # Find closest tap to THIS plant
+                        # (Dist from Tap to Plant)
+                        # We can approximate: to_tap + distance from robot to plant? No.
+                        # Stick to loop but it's small.
+                        best_tap_to_plant = 999
+                        for t in active_taps:
+                            # Heuristic optimization: reusing cache directly
+                            d = self._get_dist(t, p_pos)
+                            if d < best_tap_to_plant: best_tap_to_plant = d
+                        
+                        # Re-calculate specific robot path:
+                        # We know robot->tap min is 'to_tap' (roughly).
+                        # Let's just do the loop for accuracy as it's critical.
+                        
+                        current_best_rtp = 999
+                        for t in active_taps:
+                             d_rt = self._get_dist(r_pos, t)
+                             d_tp = self._get_dist(t, p_pos)
+                             if (d_rt + d_tp) < current_best_rtp:
+                                 current_best_rtp = d_rt + d_tp
+                        curr_dist = current_best_rtp
                 
                 if curr_dist < min_dist:
                     min_dist = curr_dist
             
-            if min_dist >= 900: dist_penalty += 1000
+            if min_dist >= 900:
+                dist_penalty += 1000
             else:
                 dist_penalty += min_dist
                 if min_dist > max_dist_obs: max_dist_obs = min_dist
@@ -391,24 +270,34 @@ class Controller:
             score += (need * p_val)
 
         score -= (total_need * 50)
+        
         metric = dist_penalty + max_dist_obs
         score -= (metric * 2.0)
         
-        # --- 4. RESOURCE HEURISTIC ---
         hoard_val = 25.0
-        target_need = total_need 
+        target_need = 999
+        
         if self.reset_threshold <= 0.05:
             hoard_val = 15.0
-            if any(r[1] in [t[0] for t in taps] for r in robots):
-                 target_need = max(target_need, 20) 
+            target_need = getattr(self, 'focus_need', 999)
+            if target_need == 0:
+                 target_need = max(self.initial_needs.values()) if self.initial_needs else 999
 
         for rid, r_pos, load in robots:
-            prob = self._get_estimated_prob(rid)
+            prob = self.assumed_prob
             usable = min(load, time_left)
             usable = min(usable, target_need)
-            score += usable * hoard_val * prob
-            if load > target_need:
-                score -= 50.0 * (load - target_need)
+            
+            r_val = hoard_val
+            if self.reset_threshold <= 0.05 and hasattr(self, 'focus_robot'):
+                if rid != self.focus_robot:
+                    r_val = 0.0
+            
+            score += usable * r_val * prob
+            
+            if self.reset_threshold <= 0.05:
+                if load > target_need:
+                    score -= 5000.0
 
         return score
 
@@ -418,10 +307,10 @@ class Controller:
 
     def _calibrate_thresholds(self):
         """
-        Determines farming mode using initial estimates.
+        Determines if we should enter "Farming Mode".
         """
-        # 1. Estimate General Mission Efficiency
         total_pot = sum(n * self.plant_values.get(p, 0) for p, n in self.initial_needs.items())
+        
         fleet_cap = sum(self.max_caps.get(rid, 0) for rid in self.robot_ids) or 1
         avg_dist = (self.grid_h + self.grid_w) / 2.0
         tot_need = sum(self.initial_needs.values())
@@ -429,13 +318,13 @@ class Controller:
         steps_est = (tot_need / fleet_cap) * 2 * avg_dist + (tot_need * 2)
         est_miss_eff = (self.goal_bonus + total_pot) / (max(steps_est, 1) * 1.2)
         
-        # 2. Estimate Farming Efficiency
         max_farm_eff = 0
         self.focus_need = 999
         self.focus_robot = -1
         
         for p_pos, need in self.initial_needs.items():
             val = self.plant_values.get(p_pos, 0)
+            
             tap_dist = avg_dist
             if p_pos in self.dist_cache:
                 dists = [self.dist_cache[p_pos].get(t[0], 999) for t in self.initial_state[2]]
@@ -445,11 +334,8 @@ class Controller:
                 rcap = self.max_caps.get(rid, 1) or 1
                 cycles = max(need / rcap, 1)
                 steps = 3 + (cycles * 2 * tap_dist) + (2 * need)
-                
-                # Use current estimate
-                prob = self._get_estimated_prob(rid)
+                prob = self.assumed_prob
                 exp_steps = steps / prob
-                
                 eff = (val * need) / exp_steps
                 
                 if eff > max_farm_eff:
@@ -465,9 +351,7 @@ class Controller:
         self.baseline_route_val = self._get_best_efficiency(self.initial_state, self.time_limit)[0]
 
     def _should_trigger_reset(self, state, time_left):
-        min_safe_horizon = (self.grid_h + self.grid_w) * 1.5 
-        if time_left < min_safe_horizon: 
-            return False
+        if time_left < 5: return False
         
         reset_eff, _ = self._get_best_efficiency(self.initial_state, time_left - 1)
         curr_eff, _ = self._get_best_efficiency(state, time_left)
@@ -494,10 +378,6 @@ class Controller:
         return False
 
     def _get_best_efficiency(self, state, time_left):
-        """
-        Estimates the best possible efficiency (Reward / Step) achievable from
-        the current state given the time remaining.
-        """
         robots, plants, taps, _ = state
         active_taps = [p for p, a in taps if a > 0]
         
@@ -506,9 +386,7 @@ class Controller:
         
         for rid, r_pos, load in robots:
             cap = self.max_caps.get(rid, 0)
-            # Dynamic Prob
-            prob = self._get_estimated_prob(rid)
-
+            
             for p_pos, need in plants:
                 if need <= 0: continue
                 avg = self.plant_values.get(p_pos, 0)
@@ -518,20 +396,17 @@ class Controller:
                     dist = self._get_dist(r_pos, p_pos)
                     amt = min(need, load)
                     steps = dist + amt
-                    # Adjust steps by probability to get expected time cost
-                    eff_steps = steps / prob
                     
                     if steps <= time_left and steps < 900:
                         rew = amt * avg
-                        # Goal reward approximation
                         if (state[3] - amt) <= 0: rew += self.goal_bonus
                         
-                        eff = rew / (eff_steps + 2.2) # +2.2 is a heuristic base cost
+                        eff = rew / (steps + 2.2)
                         if eff > best_e:
                             best_e = eff
                             best_a = f"POUR ({rid})" if dist == 0 else self._move_towards(r_pos, p_pos, rid)
 
-                # Case 2: Fill at tap then Deliver
+                # Case 2: Fill then Deliver
                 if load < cap and active_taps:
                     min_t_dist = 999
                     best_t = None
@@ -553,13 +428,11 @@ class Controller:
                             final_del = min(need, final_l)
                             
                             steps_tot = min_t_dist + amt_load + d_plant + final_del
-                            eff_steps = steps_tot / prob
-                            
                             if steps_tot <= time_left and steps_tot < 900:
                                 rew = final_del * avg
                                 if (state[3] - final_del) <= 0: rew += self.goal_bonus
                                 
-                                eff = rew / (eff_steps + 2.2)
+                                eff = rew / (steps_tot + 2.2)
                                 if eff > best_e:
                                     best_e = eff
                                     best_a = f"LOAD ({rid})" if min_t_dist == 0 else self._move_towards(r_pos, best_t, rid)
@@ -569,15 +442,17 @@ class Controller:
     #       TRANSITION & STATE LOGIC
     # =========================================================================
 
-    def _simulate_transition(self, state, action, deterministic=False):
-        if action == "RESET": return [(self.initial_state, 1.0, 0)]
+    def _simulate_transition(self, state, action_tuple, deterministic=False):
+        """
+        Simulates state transition using parsed tuple to avoid string ops.
+        """
+        # Unpack tuple directly: (Type, ID, OriginalString)
+        atype, rid, _ = action_tuple
         
-        parts = action.split()
-        atype = parts[0]
-        rid = int(parts[1].strip("()"))
+        if atype == "RESET": return [(self.initial_state, 1.0, 0)]
         
-        # Use Learned Probability
-        prob = self._get_estimated_prob(rid)
+        # Use Assumed Model Probability
+        prob = self.assumed_prob
         
         outcomes = []
         
@@ -617,7 +492,13 @@ class Controller:
         pl = list(plants)
         tl = list(taps)
         
-        idx = next(i for i, r in enumerate(rl) if r[0] == rid)
+        # Optimization: next() with generator can be slow, but list is small
+        idx = -1
+        for i, r in enumerate(rl):
+            if r[0] == rid:
+                idx = i
+                break
+        
         _, (r, c), load = rl[idx]
         rew = 0
         
@@ -626,7 +507,12 @@ class Controller:
             rl[idx] = (rid, (r+dr, c+dc), load)
             
         elif atype == "LOAD" and success:
-            t_idx = next(i for i, t in enumerate(tl) if t[0] == (r,c))
+            t_idx = -1
+            for i, t in enumerate(tl):
+                if t[0] == (r,c):
+                    t_idx = i
+                    break
+            
             tp, tamt = tl[t_idx]
             if tamt - 1 <= 0: del tl[t_idx]
             else: tl[t_idx] = (tp, tamt - 1)
@@ -661,7 +547,7 @@ class Controller:
         return (tuple(rl), tuple(pl), tuple(tl), tot_need), rew
 
     # =========================================================================
-    #       UTILITIES
+    #       UTILITIES (Parsing, Pruning, BFS)
     # =========================================================================
 
     def _parse_initial_state(self):
@@ -698,8 +584,9 @@ class Controller:
         return visited
 
     def _get_dist(self, start, end):
-        if end in self.dist_cache and start in self.dist_cache[end]:
-            return self.dist_cache[end][start]
+        # Optimization: Direct access if possible, safer defaults
+        if end in self.dist_cache:
+            return self.dist_cache[end].get(start, 999)
         return 999 
 
     def _move_towards(self, curr, target, rid):
@@ -710,20 +597,23 @@ class Controller:
         return None
 
     def _prune_moves(self, state, actions, time_left):
-        """Filters out inefficient moves."""
-        # Special farming filter
+        """
+        Filters out inefficient moves.
+        Optimized to work with action Tuples to avoid string parsing.
+        """
+        # actions is list of (atype, rid, string_rep)
+        
         if self.reset_threshold <= 0.05 and hasattr(self, 'focus_robot'):
             temp = []
-            for a in actions:
-                if a == "RESET": 
-                    temp.append(a)
+            for tpl in actions:
+                if tpl[0] == "RESET": 
+                    temp.append(tpl)
                     continue
-                parts = a.split()
-                if len(parts) > 1:
-                    rid = int(parts[1].strip("()"))
-                    if rid != self.focus_robot:
-                        if parts[0] == "LOAD": continue
-                    temp.append(a)
+                
+                # tpl = (atype, rid, s)
+                if tpl[1] != self.focus_robot:
+                    if tpl[0] == "LOAD": continue
+                temp.append(tpl)
             if temp: actions = temp
 
         robots, plants, taps, _ = state
@@ -741,13 +631,12 @@ class Controller:
                 if d < md: md = d
             r_dists[rid] = md
 
-        for a in actions:
-            if a == "RESET": continue
-            parts = a.split()
-            atype = parts[0]
-            rid = int(parts[1].strip("()"))
+        for tpl in actions:
+            atype, rid, a_str = tpl
             
+            if atype == "RESET": continue
             if rid not in rmap: continue
+            
             pos, load = rmap[rid]
             
             if rid not in grouped: grouped[rid] = []
@@ -755,16 +644,16 @@ class Controller:
             if atype == "LOAD":
                 if load >= time_left: continue
                 if (load + r_dists.get(rid, 999)) >= time_left: continue
-                grouped[rid].append((a, -1))
+                grouped[rid].append((tpl, -1))
                 continue
             
             if atype == "POUR":
-                grouped[rid].append((a, -1))
+                grouped[rid].append((tpl, -1))
                 continue
             
             targets = active_p if load > 0 else [t for t, amt in taps if amt > 0]
             if not targets:
-                grouped[rid].append((a, 0))
+                grouped[rid].append((tpl, 0))
                 continue
                 
             dr, dc = {"UP":(-1,0), "DOWN":(1,0), "LEFT":(0,-1), "RIGHT":(0,1)}[atype]
@@ -774,32 +663,34 @@ class Controller:
             for t in targets:
                 d = self._get_dist(npos, t)
                 if d < md: md = d
-            grouped[rid].append((a, md))
+            grouped[rid].append((tpl, md))
 
         final = []
         for rid, moves in grouped.items():
             moves.sort(key=lambda x: x[1])
             if moves:
                 best = moves[0][1]
-                for act, d in moves:
-                    if d <= best: final.append(act)
+                for act_tpl, d in moves:
+                    if d <= best: final.append(act_tpl)
         
-        def rank(act):
-            if act == "RESET": return -999
-            try:
-                rid = int(act.split()[1].strip("()"))
-                if rid not in rmap: return 0
-                _, l = rmap[rid]
-                c = self.max_caps.get(rid, 1)
-                # Use Learned Prob
-                p = self._get_estimated_prob(rid)
-                return l + (c * p)
-            except: return 0
+        # Sort by load + expectation
+        def rank(tpl):
+            # tpl = (atype, rid, string)
+            if tpl[0] == "RESET": return -999
+            rid = tpl[1]
+            if rid not in rmap: return 0
+            _, l = rmap[rid]
+            c = self.max_caps.get(rid, 1)
+            p = self.assumed_prob
+            return l + (c * p)
 
         final.sort(key=rank, reverse=True)
         return final
 
     def _get_valid_moves(self, state):
+        """
+        Returns valid moves as TUPLES: (ActionType, RobotID, StringRepresentation)
+        """
         robots, plants, taps, _ = state
         legal = []
         occ = {pos for _, pos, _ in robots}
@@ -812,23 +703,32 @@ class Controller:
                 nr, nc = r+dr, c+dc
                 if 0 <= nr < self.grid_h and 0 <= nc < self.grid_w and (nr, nc) not in self.walls:
                     if (nr, nc) not in occ:
-                        legal.append(f"{act} ({rid})")
+                        # Append TUPLE
+                        legal.append((act, rid, f"{act} ({rid})"))
             
             # Load
             if (r, c) in tlocs and load < self.max_caps[rid]:
-                legal.append(f"LOAD ({rid})")
+                legal.append(("LOAD", rid, f"LOAD ({rid})"))
             
             # Pour
             if (r, c) in plocs and load > 0:
-                legal.append(f"POUR ({rid})")
+                legal.append(("POUR", rid, f"POUR ({rid})"))
         
-        legal.append("RESET")
+        # Reset tuple
+        legal.append(("RESET", -1, "RESET"))
         return legal
 
     def _get_robot_moves_only(self, state, rid):
         robots, _, _, _ = state
         occ = {pos for r_id, pos, _ in robots if r_id != rid}
-        curr = next(r for r in robots if r[0] == rid)
+        
+        # Optimization: manual search is fast
+        curr = None
+        for r in robots:
+            if r[0] == rid:
+                curr = r
+                break
+                
         r, c = curr[1]
         res = []
         for act, (dr, dc) in { "UP":(-1,0), "DOWN":(1,0), "LEFT":(0,-1), "RIGHT":(0,1) }.items():
