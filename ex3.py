@@ -10,7 +10,7 @@ id = ["322587064"]
 class Controller:
     """
     RL-Adaptive Controller for Assignment 3.
-    Optimized for execution speed (removed string parsing in hot loops).
+    Optimized for execution speed and uses Bayesian Probability Estimation.
     """
 
     def __init__(self, game: ext_plant.Game):
@@ -27,8 +27,15 @@ class Controller:
 
         # --- 2. Handling Hidden Information ---
         self.plant_values = game.get_plants_max_reward()
-        self.assumed_prob = 0.85
         self.robot_ids = list(self.problem_config["Robots"].keys())
+
+        # [NEW] Bayesian Belief State
+        # Prior: Start with 9 successes / 10 attempts (0.90 optimistic start)
+        self.robot_beliefs = {
+            rid: {'success': 9.0, 'total': 10.0} for rid in self.robot_ids
+        }
+        self.prev_state = None
+        self.prev_action = None
         
         # --- 3. Pre-computations ---
         self.targets = set(self.problem_config.get("Plants", {}).keys()) | \
@@ -48,12 +55,18 @@ class Controller:
         self.memo_table = {}
         self.dynamic_initialized = False
         self.reset_threshold = 0.15
+        
+        # Used for heuristic placeholder
+        self.assumed_prob = 0.85 
 
     def choose_next_action(self, state):
         """
         Decides the next action using Iterative Deepening Expectimax.
         """
-        # 1. Calibration (Run once)
+        # [NEW] 1. Update probabilities based on what just happened
+        self._update_belief(state)
+
+        # 2. Calibration (Run once)
         if not self.dynamic_initialized:
             self._calibrate_thresholds()
             self.dynamic_initialized = True
@@ -61,18 +74,28 @@ class Controller:
         step = self.game_ref.get_current_steps()
         time_rem = self.time_limit - step
         
-        # 2. Reset Logic
+        # 3. Reset Logic
         if self._should_trigger_reset(state, time_rem):
+            self.prev_state = state
+            self.prev_action = "RESET"
             return "RESET"
 
-        # 3. Algorithm Selection
-        # Returns the string representation from the selected tuple
+        # 4. Algorithm Selection
         best_tuple = self._search_efficiency_strategy(state, time_rem)
         
-        if best_tuple == "RESET": return "RESET"
+        if best_tuple == "RESET": 
+            self.prev_state = state
+            self.prev_action = "RESET"
+            return "RESET"
         
         # best_tuple is (action_type, rid, action_string)
-        return best_tuple[2]
+        chosen_action = best_tuple[2]
+
+        # [NEW] 5. Save state for next turn's learning
+        self.prev_state = state
+        self.prev_action = chosen_action
+        
+        return chosen_action
 
     # =========================================================================
     #       CORE SEARCH ALGORITHMS
@@ -90,7 +113,7 @@ class Controller:
         if not candidates: return "RESET"
 
         t_start = time.time()
-        # Time Management: slightly tighter buffer
+        # Time Management
         t_limit = 0.5 + (20.0 / self.time_limit)
         
         best_acts = [] # List of tuples
@@ -105,7 +128,7 @@ class Controller:
                 completed_level = True
                 
                 for action_tuple in candidates:
-                    # Tighter Timeout check to prevent overruns
+                    # Tighter Timeout check
                     if (time.time() - t_start) > (t_limit * 1.1) and depth > 1: 
                         completed_level = False
                         break
@@ -131,7 +154,6 @@ class Controller:
         if not best_acts: return "RESET"
         
         # Tie-breaker: Prefer POURing
-        # action_tuple[0] is the action type (e.g. "POUR")
         pours = [a for a in best_acts if a[0] == "POUR"]
         return random.choice(pours) if pours else random.choice(best_acts)
 
@@ -139,12 +161,11 @@ class Controller:
         """
         Calculates the Expectimax value of a specific action node.
         """
-        # Timeout Check - Tighter tolerance (1.1x instead of 1.5x)
         if (time.time() - t_start) > (t_limit * 1.1): raise TimeoutError()
 
         is_det = (depth <= 1)
         
-        # Pass tuple directly, no parsing needed
+        # Pass tuple directly
         transitions = self._simulate_transition(state, action_tuple, deterministic=is_det)
         avg_score = 0
         
@@ -158,7 +179,6 @@ class Controller:
         """
         Recursive helper for Expectimax.
         """
-        # Timeout Check - Tighter tolerance
         if (time.time() - t_start) > (t_limit * 1.1): raise TimeoutError()
         
         # Memoization
@@ -194,15 +214,12 @@ class Controller:
         robots, plants, taps, total_need = state
         score = 0
         
-        # Optimization: Filter active taps once
         active_taps = [pos for pos, amt in taps if amt > 0]
         
-        # Optimization: Pre-calculate robot-to-nearest-tap distances
-        # {rid: min_dist_to_any_tap}
+        # Pre-calculate robot-to-nearest-tap
         robot_tap_dists = {}
         if active_taps:
             for rid, r_pos, _ in robots:
-                # Basic check to avoid empty sequence error
                 dists = [self._get_dist(r_pos, t) for t in active_taps]
                 robot_tap_dists[rid] = min(dists) if dists else 999
         else:
@@ -223,32 +240,14 @@ class Controller:
                 if load > 0:
                     curr_dist = self._get_dist(r_pos, p_pos)
                 elif active_taps:
-                    # Optimization: Use pre-calculated tap distance
                     to_tap = robot_tap_dists.get(rid, 999)
-                    # We still need best tap for the plant dist, but we can approximate or
-                    # just use the nearest tap logic:
-                    # A better approximation without O(T) loop:
-                    # Dist(Robot->Tap) + Dist(Tap->Plant). 
-                    # To be perfectly accurate we still need the loop, but let's optimize:
-                    # Check the 'best_tap' for this plant in a separate pre-calc? 
-                    # For now, revert to loop if accuracy is needed, but limit it.
-                    # Given 'active_taps' is usually small (1-2), the loop is okay, 
-                    # but we can skip if to_tap is already huge.
                     
                     if to_tap < 900:
-                        # Find closest tap to THIS plant
-                        # (Dist from Tap to Plant)
-                        # We can approximate: to_tap + distance from robot to plant? No.
-                        # Stick to loop but it's small.
+                        # Heuristic shortcut for tap->plant
                         best_tap_to_plant = 999
                         for t in active_taps:
-                            # Heuristic optimization: reusing cache directly
                             d = self._get_dist(t, p_pos)
                             if d < best_tap_to_plant: best_tap_to_plant = d
-                        
-                        # Re-calculate specific robot path:
-                        # We know robot->tap min is 'to_tap' (roughly).
-                        # Let's just do the loop for accuracy as it's critical.
                         
                         current_best_rtp = 999
                         for t in active_taps:
@@ -284,7 +283,9 @@ class Controller:
                  target_need = max(self.initial_needs.values()) if self.initial_needs else 999
 
         for rid, r_pos, load in robots:
-            prob = self.assumed_prob
+            # [FIXED] Use Learned Prob here too!
+            prob = self._get_robot_prob(rid)
+            
             usable = min(load, time_left)
             usable = min(usable, target_need)
             
@@ -334,7 +335,10 @@ class Controller:
                 rcap = self.max_caps.get(rid, 1) or 1
                 cycles = max(need / rcap, 1)
                 steps = 3 + (cycles * 2 * tap_dist) + (2 * need)
-                prob = self.assumed_prob
+                
+                # [FIXED] Use Learned Prob
+                prob = self._get_robot_prob(rid)
+                
                 exp_steps = steps / prob
                 eff = (val * need) / exp_steps
                 
@@ -444,15 +448,14 @@ class Controller:
 
     def _simulate_transition(self, state, action_tuple, deterministic=False):
         """
-        Simulates state transition using parsed tuple to avoid string ops.
+        Simulates state transition using parsed tuple.
         """
-        # Unpack tuple directly: (Type, ID, OriginalString)
         atype, rid, _ = action_tuple
         
         if atype == "RESET": return [(self.initial_state, 1.0, 0)]
         
-        # Use Assumed Model Probability
-        prob = self.assumed_prob
+        # [NEW] Use Dynamic Learned Probability
+        prob = self._get_robot_prob(rid)
         
         outcomes = []
         
@@ -681,7 +684,10 @@ class Controller:
             if rid not in rmap: return 0
             _, l = rmap[rid]
             c = self.max_caps.get(rid, 1)
-            p = self.assumed_prob
+            
+            # [FIXED] Use Learned Prob
+            p = self._get_robot_prob(rid)
+            
             return l + (c * p)
 
         final.sort(key=rank, reverse=True)
@@ -737,3 +743,64 @@ class Controller:
                (nr, nc) not in self.walls and (nr, nc) not in occ:
                 res.append(act)
         return res
+    
+    def _get_robot_prob(self, rid):
+        """Returns the estimated success probability for a robot (Bayesian Mean)."""
+        stats = self.robot_beliefs.get(rid, {'success': 9.0, 'total': 10.0})
+        # Bayesian average: success / total
+        return stats['success'] / stats['total']
+    
+
+    def _update_belief(self, current_state):
+        """Updates robot reliability estimates based on observed transitions."""
+        if self.prev_state is None or self.prev_action is None:
+            return
+        
+        if self.prev_action == "RESET":
+            return
+
+        # Parse what we TRIED to do
+        try:
+            # Parse 'ACTION (RID)'
+            parts = self.prev_action.split("(")
+            atype = parts[0].strip()
+            rid = int(parts[1].strip(")"))
+        except:
+            return
+
+        # Get Previous and Current Robot State
+        prev_robots = {r[0]: (r[1], r[2]) for r in self.prev_state[0]}
+        curr_robots = {r[0]: (r[1], r[2]) for r in current_state[0]}
+        
+        if rid not in prev_robots or rid not in curr_robots:
+            return
+            
+        p_pos, p_load = prev_robots[rid]
+        c_pos, c_load = curr_robots[rid]
+        
+        is_success = False
+
+        if atype in ["UP", "DOWN", "LEFT", "RIGHT"]:
+            # Check if we moved to the intended square
+            dr, dc = {"UP":(-1,0), "DOWN":(1,0), "LEFT":(0,-1), "RIGHT":(0,1)}[atype]
+            intended_pos = (p_pos[0]+dr, p_pos[1]+dc)
+            # Success if we are exactly where we wanted to be
+            if c_pos == intended_pos:
+                is_success = True
+            # Note: We assume move was legal. If blocked by wall, we shouldn't have sent it. 
+            # If blocked by dynamic robot, it might fail, but that's rare in this turn-based logic.
+            
+        elif atype == "LOAD":
+            # Success if load increased
+            if c_load > p_load:
+                is_success = True
+                
+        elif atype == "POUR":
+            # Success if load decreased
+            if c_load < p_load:
+                is_success = True
+
+        # Update Stats
+        self.robot_beliefs[rid]['total'] += 1.0
+        if is_success:
+            self.robot_beliefs[rid]['success'] += 1.0
